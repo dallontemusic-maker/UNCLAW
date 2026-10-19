@@ -25,9 +25,7 @@ struct LfoSettings {
 
 struct VoiceParams {
     std::array<OscSettings, 2> osc;
-    int subWave = 2;
-    float subLevel = 0.0f;
-    bool subEnabled = true, subFilterOn = true;
+    hybrid::Settings hybrid;
     float cutoff = 1000.0f, resonance = 1.0f;
     bool filterEnabled = true;
     int filterType = 0;
@@ -44,14 +42,8 @@ WavetableOscillator::Source toSource(int idx) {
     return static_cast<WavetableOscillator::Source>(juce::jlimit(0, 5, idx));
 }
 
-// Sub: 0 = Sine, 1 = Square, 2 = Noise
-WavetableOscillator::Source toSubSource(int idx) {
-    switch (idx) {
-        case 0:  return WavetableOscillator::Source::Sine;
-        case 1:  return WavetableOscillator::Source::Square;
-        default: return WavetableOscillator::Source::Noise;
-    }
-}
+// Цели LFO; новые добавлены в конец, чтобы старые пресеты открывались с теми же целями
+enum LfoDestination { lfoOff = 0, lfoCutoff, lfoOsc1Wt, lfoOsc2Wt, lfoPitch, lfoHybridPitch, lfoHybridLevel, lfoNoiseTilt };
 
 // Таблица по умолчанию (8 кадров: синус -> пила), чтобы синтезатор звучал и без загруженного WAV.
 std::shared_ptr<const WaveTable> makeDefaultWavetable() {
@@ -109,8 +101,12 @@ public:
             u.panCur = u.s.pan;
             u.stereoCur = u.s.stereo;
         }
-        sub.setFrequency(baseFreq * 0.5f);   // Sub звучит на октаву ниже
+        noteNumber = midiNoteNumber;
+        updateHybridPitch();
         sub.resetPhase();
+        samplePlayer.start(hybridSample.get(), hyb.start, hyb.reverse);
+        hybLevelCur = hyb.level;
+        hybPanCur = hyb.pan;
         for (auto& f : filters) f.reset();
         for (auto& env : ampEnvelopes) env.noteOn();
         subAmpEnvelope.noteOn();
@@ -129,6 +125,7 @@ public:
     void pitchWheelMoved (int value) override {
         pitchWheel = juce::jlimit(0, 16383, value);
         updateFrequencies();
+        updateHybridPitch();
     }
     void controllerMoved (int controller, int value) override {
         if (controller == 1) modWheel = juce::jlimit(0, 127, value) / 127.0f;
@@ -140,6 +137,7 @@ public:
         for (auto& u : units)
             for (auto& v : u.voices) v.prepare(sampleRate);
         sub.prepare(sampleRate);
+        tilt.prepare(sampleRate);
         for (auto& env : ampEnvelopes) env.setSampleRate(sampleRate);
         subAmpEnvelope.setSampleRate(sampleRate);
         filterAdsr.setSampleRate(sampleRate);
@@ -154,10 +152,17 @@ public:
         }
     }
 
-    void setWavetables(const std::shared_ptr<const WaveTable>& wt1, const std::shared_ptr<const WaveTable>& wt2) {
+    void setSources(const std::shared_ptr<const WaveTable>& wt1, const std::shared_ptr<const WaveTable>& wt2,
+                    const std::shared_ptr<const hybrid::Sample>& sample) {
         for (auto& v : units[0].voices) v.loadTable(wt1);
         for (auto& v : units[1].voices) v.loadTable(wt2);
+        if (sample != hybridSample) {
+            samplePlayer.stop();   // звучащий голос не читает старый сэмпл после замены
+            hybridSample = sample;
+        }
     }
+
+    void setDryBus(juce::AudioBuffer<float>* bus) { dryBus = bus; }
 
     void setParams(const VoiceParams& p) {
         for (size_t i = 0; i < 2; ++i) {
@@ -185,10 +190,10 @@ public:
                                                    : juce::dsp::StateVariableTPTFilterType::lowpass));
         updateFrequencies();
 
-        sub.setSource(toSubSource(p.subWave));
-        subLevel = p.subLevel;
-        subEnabled = p.subEnabled;
-        subFilterOn = p.subFilterOn;
+        hyb = p.hybrid;
+        sub.setSource(hyb.subShape == 1 ? WavetableOscillator::Source::Square : WavetableOscillator::Source::Sine);
+        tilt.setTilt(hyb.tiltDb);
+        updateHybridPitch();
         subAmpEnvelope.setParameters(p.subAmpEnvelope);
         for (size_t i = 0; i < lfoSettings.size(); ++i) {
             lfoSettings[i] = p.lfos[i];
@@ -214,16 +219,21 @@ public:
             const float filterEnv = filterAdsr.getNextSample();
             float filterLfoSemitones = 0.0f, pitchLfoSemitones = 0.0f;
             float wtLfoOffset[2] {};
-            bool pitchLfoActive = false;
+            float hybPitchSemitones = 0.0f, hybLevelMod = 0.0f, tiltLfoDb = 0.0f;
+            bool pitchLfoActive = false, hybPitchLfoActive = false, tiltLfoActive = false;
             for (size_t lfoIndex = 0; lfoIndex < lfoSettings.size(); ++lfoIndex) {
                 const auto& lfo = lfoSettings[lfoIndex];
                 if (!lfo.enabled || lfo.destination == 0) continue;
                 const float value = lfoValue(lfo.waveform, lfoPhase[lfoIndex]) * lfo.depth;
                 switch (lfo.destination) {
-                    case 1: filterLfoSemitones += value * 24.0f; break;
-                    case 2: wtLfoOffset[0] += value; break;
-                    case 3: wtLfoOffset[1] += value; break;
-                    case 4: pitchLfoSemitones += value * 12.0f; pitchLfoActive = true; break;
+                    case lfoCutoff: filterLfoSemitones += value * 24.0f; break;
+                    case lfoOsc1Wt: wtLfoOffset[0] += value; break;
+                    case lfoOsc2Wt: wtLfoOffset[1] += value; break;
+                    case lfoPitch: pitchLfoSemitones += value * 12.0f; pitchLfoActive = true; break;
+                    case lfoHybridPitch: hybPitchSemitones += value * 12.0f; hybPitchLfoActive = true; break;
+                    case lfoHybridLevel: hybLevelMod += value; break;
+                    case lfoNoiseTilt: tiltLfoDb += value * 12.0f; tiltLfoActive = true; break;
+                    default: break;
                 }
                 lfoPhase[lfoIndex] += lfo.rateHz / (float) currentSampleRate;
                 if (lfoPhase[lfoIndex] >= 1.0f) lfoPhase[lfoIndex] -= std::floor(lfoPhase[lfoIndex]);
@@ -231,6 +241,18 @@ public:
             if (pitchLfoActive || lastPitchLfoSemitones != 0.0f) {
                 updateFrequencies(pitchLfoSemitones);
                 lastPitchLfoSemitones = pitchLfoSemitones;
+            }
+            // общий Pitch-LFO тоже сдвигает гибридный источник, как и осцилляторы
+            const float hybLfoTotal = pitchLfoSemitones + hybPitchSemitones;
+            if (pitchLfoActive || hybPitchLfoActive || lastHybLfoSemitones != 0.0f) {
+                if ((i & 7) == 0 || hybLfoTotal == 0.0f) {
+                    updateHybridPitch(hybLfoTotal);
+                    lastHybLfoSemitones = hybLfoTotal;
+                }
+            }
+            if ((tiltLfoActive || lastTiltLfoDb != 0.0f) && (i & 7) == 0) {
+                tilt.setTilt(hyb.tiltDb + tiltLfoDb);
+                lastTiltLfoDb = tiltLfoDb;
             }
             if ((i & 7) == 0) {
                 const float cutoff = juce::jlimit(20.0f, (float)(0.45 * currentSampleRate),
@@ -270,16 +292,20 @@ public:
                 }
             }
 
-            const float subSample = (subEnabled ? subLevel : 0.0f) * subAmpEnvelope.getNextSample() * sub.processSample();
-            if (filterEnabled && subFilterOn) {
-                left += filters[2].processSample(0, subSample);
-                right += filters[2].processSample(1, subSample);
+            float hybLeft = 0.0f, hybRight = 0.0f;
+            renderHybrid(hybLeft, hybRight, hybLevelMod);
+            const float gainOut = velocityGain * 0.2f;
+            if (hyb.route == hybrid::Route::Filter && filterEnabled) {
+                left += filters[2].processSample(0, hybLeft);
+                right += filters[2].processSample(1, hybRight);
+            } else if (hyb.route == hybrid::Route::Dry && dryBus != nullptr) {
+                dryBus->addSample(0, startSample + i, hybLeft * gainOut);
+                dryBus->addSample(1, startSample + i, hybRight * gainOut);
             } else {
-                left += subSample;
-                right += subSample;
+                left += hybLeft;
+                right += hybRight;
             }
 
-            const float gainOut = velocityGain * 0.2f;
             const float outL = left * gainOut;
             const float outR = right * gainOut;
 
@@ -319,6 +345,46 @@ private:
         float levelCur = 1.0f, panCur = 0.0f, stereoCur = 0.7f;
     };
 
+    // Высота гибридного источника: саб — частота осциллятора, сэмплер — скорость чтения файла
+    void updateHybridPitch(float lfoSemitones = 0.0f) {
+        const float bendSemitones = ((float) pitchWheel - 8192.0f) / 8192.0f * pitchBendRange;
+        const float common = bendSemitones + lfoSemitones + hyb.fineCents / 100.0f;
+        sub.setFrequency(baseFreq * std::exp2((float) hyb.subOctave + common / 12.0f));
+        if (hybridSample != nullptr) {
+            const float noteShift = hyb.keytrack ? (float) (noteNumber - hyb.rootNote) : 0.0f;
+            sampleIncrement = hybridSample->sampleRate / currentSampleRate
+                            * std::exp2((noteShift + (float) hyb.pitchSemitones + common) / 12.0f);
+        }
+    }
+
+    void renderHybrid(float& outLeft, float& outRight, float levelMod) {
+        const float env = subAmpEnvelope.getNextSample();
+        hybLevelCur += (hyb.level - hybLevelCur) * smoothCoef;
+        hybPanCur += (hyb.pan - hybPanCur) * smoothCoef;
+        if (!hyb.enabled) return;
+
+        float l = 0.0f, r = 0.0f;
+        switch (hyb.mode) {
+            case hybrid::Mode::Sub:
+                l = r = sub.processSample();
+                break;
+            case hybrid::Mode::Noise: {
+                // общий сигнал + независимые L/R: Stereo = 0 — моно, 1 — полностью декоррелированный шум
+                const float shared = noise[0].next(random, hyb.colour);
+                const float a = std::sqrt(1.0f - hyb.noiseStereo), b = std::sqrt(hyb.noiseStereo);
+                l = tilt.process(0, shared * a + noise[1].next(random, hyb.colour) * b);
+                r = tilt.process(1, shared * a + noise[2].next(random, hyb.colour) * b);
+                break;
+            }
+            case hybrid::Mode::Sample:
+                samplePlayer.process(l, r, sampleIncrement, hyb.loop, hyb.reverse);
+                break;
+        }
+        const float gain = hybLevelCur * env * juce::jlimit(0.0f, 2.0f, 1.0f + levelMod);
+        outLeft = l * gain * (hybPanCur > 0.0f ? 1.0f - hybPanCur : 1.0f);
+        outRight = r * gain * (hybPanCur < 0.0f ? 1.0f + hybPanCur : 1.0f);
+    }
+
     // Высота каждого голоса: нота + Octave + Interval + Fine + разброс Detune (в центах)
     void updateFrequencies(float pitchLfoSemitones = 0.0f) {
         for (size_t oscIndex = 0; oscIndex < units.size(); ++oscIndex) {
@@ -340,8 +406,15 @@ private:
     std::array<float, 2> lfoPhase {};
     float lastPitchLfoSemitones = 0.0f;
     WavetableOscillator sub;
-    float subLevel = 0.0f;
-    bool subEnabled = true, subFilterOn = true;
+    hybrid::Settings hyb;
+    std::array<hybrid::ColouredNoise, 3> noise;
+    hybrid::Tilt tilt;
+    hybrid::SamplePlayer samplePlayer;
+    std::shared_ptr<const hybrid::Sample> hybridSample;
+    juce::AudioBuffer<float>* dryBus = nullptr;
+    double sampleIncrement = 1.0;
+    float hybLevelCur = 0.0f, hybPanCur = 0.0f, lastHybLfoSemitones = 0.0f, lastTiltLfoDb = 0.0f;
+    int noteNumber = 60;
     std::array<juce::ADSR, 2> ampEnvelopes;
     juce::ADSR subAmpEnvelope;
     juce::ADSR filterAdsr;
@@ -410,6 +483,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout WavetableSynthAudioProcessor
     };
     auto cents = [] (float v, int) { return juce::String((int) std::lround(v)) + " ct"; };
     auto degrees = [] (float v, int) { return juce::String((int) std::lround(v)) + juce::String(juce::CharPointer_UTF8("\xc2\xb0")); };
+    auto semitones = [] (int v, int) { return juce::String(v > 0 ? "+" : "") + juce::String(v) + " st"; };
+    auto decibels = [] (float v, int) { return juce::String(v > 0.0f ? "+" : "") + juce::String(v, 1) + " dB"; };
+    auto percent = [] (float v, int) { return juce::String((int) std::lround(v * 100.0f)) + " %"; };
+    auto noteText = [] (int v, int) { return hybrid::noteName(v); };
 
     for (int n = 1; n <= 2; ++n) {
         const juce::String pre = "OSC" + juce::String(n) + "_";
@@ -433,10 +510,24 @@ juce::AudioProcessorValueTreeState::ParameterLayout WavetableSynthAudioProcessor
         params.push_back(std::make_unique<juce::AudioParameterFloat>(pre + "ENV_SUSTAIN", nm + "Amp Sustain", 0.0f, 1.0f, 0.8f));
         params.push_back(std::make_unique<juce::AudioParameterFloat>(pre + "ENV_RELEASE", nm + "Amp Release", 0.01f, 5.0f, 0.3f));
     }
-    params.push_back(std::make_unique<juce::AudioParameterChoice>("SUB_WAVE", "Sub Wave", juce::StringArray{"Sine", "Square", "Noise"}, 2));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>("SUB_LEVEL", "Sub Level", 0.0f, 1.0f, 0.0f));
-    params.push_back(std::make_unique<juce::AudioParameterBool>("SUB_ON", "Sub Enabled", true));
-    params.push_back(std::make_unique<juce::AudioParameterBool>("SUB_FILTER", "Sub To Filter", true));
+    // Гибридный источник. Идентификаторы SUB_* сохранены, чтобы старые пресеты открывались с теми же значениями.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>("SUB_MODE", "Hybrid Mode", juce::StringArray { "Sub", "Noise", "Sample" }, 0));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>("SUB_SHAPE", "Sub Shape", juce::StringArray { "Sine", "Square" }, 0));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>("SUB_OCTAVE", "Sub Octave", juce::StringArray { "-1 oct", "-2 oct" }, 0));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>("SUB_LEVEL", "Hybrid Level", 0.0f, 1.0f, 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterBool>("SUB_ON", "Hybrid Enabled", true));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>("SUB_FINE", "Hybrid Fine", juce::NormalisableRange<float>(-100.0f, 100.0f, 0.1f), 0.0f, FloatAttr().withStringFromValueFunction(cents)));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>("SUB_PAN", "Hybrid Pan", juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 0.0f, FloatAttr().withStringFromValueFunction(panText).withValueFromStringFunction(panValue)));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>("SUB_ROUTE", "Hybrid Route", juce::StringArray { "Filter", "Direct", "Dry" }, 0));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>("NOISE_COLOR", "Noise Color", juce::StringArray { "White", "Pink", "Brown" }, 0));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>("NOISE_TILT", "Noise Tilt", juce::NormalisableRange<float>(-12.0f, 12.0f, 0.1f), 0.0f, FloatAttr().withStringFromValueFunction(decibels)));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>("NOISE_STEREO", "Noise Stereo", 0.0f, 1.0f, 0.5f));
+    params.push_back(std::make_unique<juce::AudioParameterInt>("SMP_PITCH", "Sample Pitch", -24, 24, 0, IntAttr().withStringFromValueFunction(semitones)));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>("SMP_START", "Sample Start", juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.0f, FloatAttr().withStringFromValueFunction(percent)));
+    params.push_back(std::make_unique<juce::AudioParameterBool>("SMP_LOOP", "Sample Loop", false));
+    params.push_back(std::make_unique<juce::AudioParameterBool>("SMP_REVERSE", "Sample Reverse", false));
+    params.push_back(std::make_unique<juce::AudioParameterBool>("SMP_KEYTRACK", "Sample Keytrack", true));
+    params.push_back(std::make_unique<juce::AudioParameterInt>("SMP_ROOT", "Sample Root Note", 0, 127, 60, IntAttr().withStringFromValueFunction(noteText)));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("SUB_ENV_ATTACK", "Sub Amp Attack", 0.001f, 5.0f, 0.01f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("SUB_ENV_DECAY", "Sub Amp Decay", 0.01f, 5.0f, 0.2f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("SUB_ENV_SUSTAIN", "Sub Amp Sustain", 0.0f, 1.0f, 0.8f));
@@ -464,7 +555,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout WavetableSynthAudioProcessor
         const juce::String label = "LFO " + juce::String(n) + " ";
         params.push_back(std::make_unique<juce::AudioParameterBool>(pre + "ON", label + "On", false));
         params.push_back(std::make_unique<juce::AudioParameterChoice>(pre + "DEST", label + "Destination",
-            juce::StringArray { "Off", "Cutoff", "OSC 1 WT", "OSC 2 WT", "Pitch" }, 0));
+            juce::StringArray { "Off", "Cutoff", "OSC 1 WT", "OSC 2 WT", "Pitch", "Hybrid Pitch", "Hybrid Level", "Noise Tilt" }, 0));
         params.push_back(std::make_unique<juce::AudioParameterChoice>(pre + "WAVE", label + "Waveform",
             juce::StringArray { "Sine", "Triangle", "Saw", "Square" }, 0));
         params.push_back(std::make_unique<juce::AudioParameterFloat>(pre + "RATE", label + "Rate",
@@ -478,7 +569,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout WavetableSynthAudioProcessor
     params.push_back(std::make_unique<juce::AudioParameterChoice>("VOICE_MODE", "Voice Mode", juce::StringArray{"Poly", "Mono", "Legato"}, 0));
     params.push_back(std::make_unique<juce::AudioParameterChoice>("VOICE_COUNT", "Polyphony", juce::StringArray{"1", "2", "3", "4", "5", "6", "7", "8"}, 7));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("GLIDE_TIME", "Glide Time", 0.0f, 1.0f, 0.05f));
-    params.push_back(std::make_unique<juce::AudioParameterChoice>("PITCH_RANGE", "Pitch Bend Range", juce::StringArray { "±2 semitones", "±12 semitones", "±24 semitones" }, 0));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>("PITCH_RANGE", "Pitch Bend Range", juce::StringArray { juce::String::fromUTF8("±2 semitones"), juce::String::fromUTF8("±12 semitones"), juce::String::fromUTF8("±24 semitones") }, 0));
 
     params.push_back(std::make_unique<juce::AudioParameterChoice>("REV_MODE", "Reverb Mode", juce::StringArray{"Ambience", "Room", "Hall", "Plate"}, 1));
     params.push_back(std::make_unique<juce::AudioParameterBool>("REV_ON", "Reverb On", true));
@@ -509,9 +600,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout WavetableSynthAudioProcessor
 void WavetableSynthAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock) {
     currentSampleRate = sampleRate;
     synth.setCurrentPlaybackSampleRate(sampleRate);
+    dryBus.setSize(2, juce::jmax(1, samplesPerBlock));
     for (int i = 0; i < synth.getNumVoices(); ++i)
-        if (auto* voice = dynamic_cast<SynthVoice*>(synth.getVoice(i)))
+        if (auto* voice = dynamic_cast<SynthVoice*>(synth.getVoice(i))) {
             voice->prepareToPlay(sampleRate, samplesPerBlock, 2);
+            voice->setDryBus(&dryBus);
+        }
 
     juce::dsp::ProcessSpec spec;
     spec.sampleRate = sampleRate;
@@ -547,7 +641,7 @@ void WavetableSynthAudioProcessor::updateVoiceWavetables() {
 
     for (int i = 0; i < synth.getNumVoices(); ++i)
         if (auto* voice = dynamic_cast<SynthVoice*>(synth.getVoice(i)))
-            voice->setWavetables(wavetable1, wavetable2);
+            voice->setSources(wavetable1, wavetable2, hybridSample);
     wavetablesDirty = false;
 }
 
@@ -714,10 +808,24 @@ void WavetableSynthAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
         env.sustain = get((prefix + "ENV_SUSTAIN").toRawUTF8());
         env.release = get((prefix + "ENV_RELEASE").toRawUTF8());
     }
-    vp.subWave = (int) get("SUB_WAVE");
-    vp.subLevel = get("SUB_LEVEL");
-    vp.subEnabled = get("SUB_ON") > 0.5f;
-    vp.subFilterOn = get("SUB_FILTER") > 0.5f;
+    auto& h = vp.hybrid;
+    h.mode = static_cast<hybrid::Mode>(juce::jlimit(0, 2, (int) std::lround(get("SUB_MODE"))));
+    h.subShape = (int) std::lround(get("SUB_SHAPE"));
+    h.subOctave = std::lround(get("SUB_OCTAVE")) == 1 ? -2 : -1;
+    h.level = get("SUB_LEVEL");
+    h.enabled = get("SUB_ON") > 0.5f;
+    h.fineCents = get("SUB_FINE");
+    h.pan = get("SUB_PAN");
+    h.route = static_cast<hybrid::Route>(juce::jlimit(0, 2, (int) std::lround(get("SUB_ROUTE"))));
+    h.colour = static_cast<hybrid::NoiseColour>(juce::jlimit(0, 2, (int) std::lround(get("NOISE_COLOR"))));
+    h.tiltDb = get("NOISE_TILT");
+    h.noiseStereo = get("NOISE_STEREO");
+    h.pitchSemitones = (int) std::lround(get("SMP_PITCH"));
+    h.start = get("SMP_START");
+    h.loop = get("SMP_LOOP") > 0.5f;
+    h.reverse = get("SMP_REVERSE") > 0.5f;
+    h.keytrack = get("SMP_KEYTRACK") > 0.5f;
+    h.rootNote = (int) std::lround(get("SMP_ROOT"));
     vp.subAmpEnvelope.attack = get("SUB_ENV_ATTACK");
     vp.subAmpEnvelope.decay = get("SUB_ENV_DECAY");
     vp.subAmpEnvelope.sustain = get("SUB_ENV_SUSTAIN");
@@ -748,6 +856,9 @@ void WavetableSynthAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
         if (auto* voice = dynamic_cast<SynthVoice*>(synth.getVoice(i)))
             voice->setParams(vp);
 
+    if (dryBus.getNumSamples() < numSamples)   // хост прислал блок больше заявленного
+        dryBus.setSize(2, numSamples, false, false, true);
+    dryBus.clear();
     synth.renderNextBlock(buffer, midiMessages, 0, numSamples);
 
     // --- сатурация ---
@@ -813,6 +924,15 @@ void WavetableSynthAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
         juce::dsp::AudioBlock<float> block(buffer);
         juce::dsp::ProcessContextReplacing<float> context(block);
         reverb.process(context);
+    }
+
+    // Маршрут DRY гибридного источника: мимо фильтра и эффектов, подмешивается перед мастером
+    if (numChannels == 1) {
+        buffer.addFrom(0, 0, dryBus, 0, 0, numSamples, 0.5f);
+        buffer.addFrom(0, 0, dryBus, 1, 0, numSamples, 0.5f);
+    } else {
+        for (int ch = 0; ch < 2; ++ch)
+            buffer.addFrom(ch, 0, dryBus, ch, 0, numSamples);
     }
 
     // Master volume and stereo balance are applied after the effects chain.
@@ -1091,6 +1211,99 @@ void WavetableSynthAudioProcessor::loadWavetableAsync(const juce::File& file, in
     });
 }
 
+bool WavetableSynthAudioProcessor::isSupportedAudioFile(const juce::File& file) {
+    return file.existsAsFile() && file.hasFileExtension("wav;aif;aiff;flac");
+}
+
+bool WavetableSynthAudioProcessor::loadHybridSample(const juce::File& file) {
+    auto fail = [&] (const juce::String& why) {
+        const juce::CriticalSection::ScopedLockType lock(statusLock);
+        hybridStatus = file.getFileName() + ": " + why;
+        ++hybridSampleVersion;
+        return false;
+    };
+
+    juce::AudioFormatManager formatManager;
+    formatManager.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
+    if (reader == nullptr) return fail("cannot read this file");
+    if (reader->lengthInSamples <= 1 || reader->numChannels == 0 || reader->sampleRate <= 0.0) return fail("file is empty");
+
+    constexpr double maxSeconds = 60.0;   // длиннее не нужно для сэмплера, а память растёт быстро
+    const int totalSamples = (int) std::min<juce::int64>(reader->lengthInSamples, (juce::int64) (reader->sampleRate * maxSeconds));
+    auto sample = std::make_shared<hybrid::Sample>();
+    sample->audio.setSize(juce::jlimit(1, 2, (int) reader->numChannels), totalSamples);
+    sample->audio.clear();
+    if (!reader->read(&sample->audio, 0, totalSamples, 0, true, true)) return fail("read error");
+    sample->sampleRate = reader->sampleRate;
+    sample->name = file.getFileNameWithoutExtension();
+
+    float peak = 0.0f;
+    sample->peaks.assign((size_t) hybrid::Sample::kPeakCount, 0.0f);
+    for (int ch = 0; ch < sample->audio.getNumChannels(); ++ch) {
+        const float* data = sample->audio.getReadPointer(ch);
+        for (int i = 0; i < totalSamples; ++i) {
+            if (!std::isfinite(data[i])) return fail("file contains invalid data");
+            const float a = std::abs(data[i]);
+            auto& bucket = sample->peaks[(size_t) ((juce::int64) i * hybrid::Sample::kPeakCount / totalSamples)];
+            bucket = juce::jmax(bucket, a);
+            peak = juce::jmax(peak, a);
+        }
+    }
+    if (peak < 1.0e-4f) return fail("file is silent");
+    for (auto& p : sample->peaks) p /= peak;   // экран показывает форму, а не абсолютный уровень
+
+    std::shared_ptr<const hybrid::Sample> toFree;
+    {
+        const juce::SpinLock::ScopedLockType lock(wavetableLock);
+        retiredSamples.push_back(hybridSample);
+        hybridSample = sample;
+        if (retiredSamples.size() > 4) {
+            toFree = retiredSamples.front();
+            retiredSamples.erase(retiredSamples.begin());
+        }
+    }
+    wavetablesDirty = true;
+    {
+        const juce::CriticalSection::ScopedLockType lock(statusLock);
+        hybridFile = file;
+        hybridStatus = sample->name + " (" + juce::String(sample->lengthSeconds(), 2) + " s)";
+    }
+    ++hybridSampleVersion;
+    return true;
+}
+
+void WavetableSynthAudioProcessor::loadHybridSampleAsync(const juce::File& file, std::function<void(bool)> completion) {
+    loadPool.addJob([this, file, completion = std::move(completion)]() mutable {
+        const bool loaded = loadHybridSample(file);
+        if (completion)
+            juce::MessageManager::callAsync([completion = std::move(completion), loaded]() mutable {
+                completion(loaded);
+            });
+    });
+}
+
+WavetableSynthAudioProcessor::HybridSampleView WavetableSynthAudioProcessor::getHybridSampleView() {
+    HybridSampleView view;
+    const juce::SpinLock::ScopedLockType lock(wavetableLock);
+    if (hybridSample != nullptr) {
+        view.peaks = hybridSample->peaks;
+        view.name = hybridSample->name;
+        view.seconds = hybridSample->lengthSeconds();
+    }
+    return view;
+}
+
+juce::String WavetableSynthAudioProcessor::getHybridStatus() const {
+    const juce::CriticalSection::ScopedLockType lock(statusLock);
+    return hybridStatus;
+}
+
+juce::File WavetableSynthAudioProcessor::getHybridFile() const {
+    const juce::CriticalSection::ScopedLockType lock(statusLock);
+    return hybridFile;
+}
+
 void WavetableSynthAudioProcessor::getStateInformation (juce::MemoryBlock& destData) {
     auto state = parameters.copyState();
     std::unique_ptr<juce::XmlElement> xml (state.createXml());
@@ -1098,12 +1311,34 @@ void WavetableSynthAudioProcessor::getStateInformation (juce::MemoryBlock& destD
     // Какие файлы загружены в осцилляторы — сохраняем в пресет, чтобы после перезагрузки проекта они вернулись
     xml->setAttribute("osc1File", getWavetableFile(1).getFullPathName());
     xml->setAttribute("osc2File", getWavetableFile(2).getFullPathName());
+    xml->setAttribute("hybridFile", getHybridFile().getFullPathName());
     copyXmlToBinary (*xml, destData);
 }
 
 void WavetableSynthAudioProcessor::setStateInformation (const void* data, int sizeInBytes) {
     std::unique_ptr<juce::XmlElement> xmlState (getXmlFromBinary (data, sizeInBytes));
     if (xmlState == nullptr || !xmlState->hasTagName (parameters.state.getType())) return;
+
+    // Пресеты до гибридного источника: SUB_WAVE (Sine/Square/Noise) и SUB_FILTER (вкл/выкл)
+    auto findParam = [&xmlState] (const juce::String& id) -> juce::XmlElement* {
+        for (auto* e : xmlState->getChildIterator())
+            if (e->getStringAttribute("id") == id) return e;
+        return nullptr;
+    };
+    auto addParam = [&xmlState] (const juce::String& id, double value) {
+        auto* e = xmlState->createNewChildElement("PARAM");
+        e->setAttribute("id", id);
+        e->setAttribute("value", value);
+    };
+    if (findParam("SUB_MODE") == nullptr) {
+        if (auto* wave = findParam("SUB_WAVE")) {
+            const int w = juce::roundToInt(wave->getDoubleAttribute("value"));
+            addParam("SUB_MODE", w == 2 ? 1.0 : 0.0);    // Noise -> режим NOISE (белый шум)
+            addParam("SUB_SHAPE", w == 1 ? 1.0 : 0.0);
+        }
+        if (auto* toFilter = findParam("SUB_FILTER"))
+            addParam("SUB_ROUTE", toFilter->getDoubleAttribute("value") > 0.5 ? 0.0 : 1.0);
+    }
 
     parameters.replaceState (juce::ValueTree::fromXml (*xmlState));
     for (int osc = 1; osc <= 2; ++osc) {
@@ -1112,6 +1347,17 @@ void WavetableSynthAudioProcessor::setStateInformation (const void* data, int si
         const juce::File f(path);
         if (f.existsAsFile()) loadWavetableAsync(f, osc);
         else setWavetableStatus(osc == 1 ? 0 : 1, f.getFileName() + ": file not found", juce::File());
+    }
+    const auto samplePath = xmlState->getStringAttribute("hybridFile");
+    if (samplePath.isNotEmpty()) {
+        const juce::File f(samplePath);
+        if (f.existsAsFile()) {
+            loadHybridSampleAsync(f);
+        } else {
+            const juce::CriticalSection::ScopedLockType lock(statusLock);
+            hybridStatus = f.getFileName() + ": file not found";
+            ++hybridSampleVersion;
+        }
     }
 }
 

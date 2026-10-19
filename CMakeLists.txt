@@ -43,6 +43,9 @@ target_sources(WavetableSynth PRIVATE
     Source/OscilloscopeDisplay.h
     Source/WavetableLoader.h
     Source/BrowserSettings.h
+    Source/HybridSource.h
+    Source/HybridComponents.h
+    Source/UnclawLookAndFeel.h
 )
 
 target_compile_definitions(WavetableSynth PUBLIC
@@ -65,3 +68,27 @@ target_link_libraries(WavetableSynth
     PUBLIC
         juce::juce_recommended_config_flags
 )
+
+# Проверки гибридного источника (по умолчанию не собираются): -DUNCLAW_BUILD_TESTS=ON
+option(UNCLAW_BUILD_TESTS "Build UnclawHybridTests" OFF)
+if(UNCLAW_BUILD_TESTS)
+    juce_add_console_app(UnclawHybridTests PRODUCT_NAME "UnclawHybridTests")
+    target_sources(UnclawHybridTests PRIVATE
+        tests/HybridTests.cpp
+        Source/PluginProcessor.cpp
+        Source/PluginEditor.cpp)
+    target_compile_definitions(UnclawHybridTests PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_STANDALONE_APPLICATION=1
+        JUCE_MODAL_LOOPS_PERMITTED=1)
+    target_link_libraries(UnclawHybridTests
+        PRIVATE
+            juce::juce_audio_utils
+            juce::juce_audio_formats
+            juce::juce_audio_processors
+            juce::juce_dsp
+            juce::juce_gui_basics
+        PUBLIC
+            juce::juce_recommended_config_flags)
+endif()

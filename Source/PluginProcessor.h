@@ -7,6 +7,7 @@
 #include <memory>
 #include <vector>
 #include "WavetableOscillator.h"
+#include "HybridSource.h"
 
 class WavetableSynthAudioProcessor : public juce::AudioProcessor {
 public:
@@ -50,6 +51,16 @@ public:
     juce::String getWavetableStatus(int oscIndex) const;   // текст для интерфейса: что загружено / почему не вышло
     juce::File getWavetableFile(int oscIndex) const;
     std::array<float, 64> getWavetablePreview(int oscIndex);
+
+    // Гибридный источник: сэмпл для режима SAMPLE (тот же механизм подмены, что и у вейвтейблов)
+    bool loadHybridSample(const juce::File& file);
+    void loadHybridSampleAsync(const juce::File& file, std::function<void(bool)> completion = {});
+    struct HybridSampleView { std::vector<float> peaks; juce::String name; double seconds = 0.0; };
+    HybridSampleView getHybridSampleView();
+    juce::String getHybridStatus() const;
+    juce::File getHybridFile() const;
+    int getHybridSampleVersion() const { return hybridSampleVersion.load(); }
+    static bool isSupportedAudioFile(const juce::File& file);
     std::vector<float> oscilloscopeBuffer;
 
 private:
@@ -108,6 +119,13 @@ private:
     mutable juce::CriticalSection statusLock;
     std::array<juce::String, 2> statusText { juce::String("built-in wavetable"), juce::String("built-in wavetable") };
     std::array<juce::File, 2> loadedFile;
+
+    std::shared_ptr<const hybrid::Sample> hybridSample;
+    std::vector<std::shared_ptr<const hybrid::Sample>> retiredSamples;
+    juce::AudioBuffer<float> dryBus;   // маршрут DRY: голоса пишут сюда, шина подмешивается после эффектов
+    juce::String hybridStatus { "drop an audio file here" };
+    juce::File hybridFile;
+    std::atomic<int> hybridSampleVersion { 0 };
 
     juce::ThreadPool loadPool { 1 };   // объявлен последним: при удалении процессора останавливается первым
 
