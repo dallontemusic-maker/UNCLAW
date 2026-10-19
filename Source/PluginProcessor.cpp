@@ -346,6 +346,7 @@ private:
     juce::ADSR filterAdsr;
     std::array<juce::dsp::StateVariableTPTFilter<float>, 3> filters;
     float filterBaseCutoff = 1000.0f;
+    bool filterEnabled = true;
     float filterEnvAmountSemitones = 0.0f;
     juce::Random random;
     double currentSampleRate = 44100.0;
