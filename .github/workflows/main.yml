@@ -1,0 +1,68 @@
+name: Build VST3 Plugin
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build on ${{ matrix.platform_name }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform_name: "Windows"
+          - os: macos-latest
+            platform_name: "macOS"
+          - os: ubuntu-latest
+            platform_name: "Linux"
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install Linux dependencies
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libasound2-dev libfreetype-dev libfontconfig1-dev \
+          libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxext-dev libxi-dev libgl1-mesa-dev
+
+    - name: Configure CMake
+      shell: bash
+      run: |
+        ARGS=()
+        if [ "$RUNNER_OS" = "macOS" ]; then
+          # универсальная сборка: Apple Silicon + Intel
+          ARGS+=("-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64" "-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0")
+        fi
+        cmake -B build -DCMAKE_BUILD_TYPE=Release "${ARGS[@]}"
+
+    - name: Build Project
+      run: cmake --build build --config Release --parallel 4
+
+    - name: Ad-hoc sign (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        for f in build/WavetableSynth_artefacts/Release/VST3/*.vst3 \
+                 build/WavetableSynth_artefacts/Release/AU/*.component \
+                 build/WavetableSynth_artefacts/Release/Standalone/*.app; do
+          [ -e "$f" ] && codesign --force --deep --sign - "$f"
+        done
+        lipo -archs "build/WavetableSynth_artefacts/Release/VST3/WavetableSynth.vst3/Contents/MacOS/WavetableSynth"
+
+    - name: Upload Plugin Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: WavetableSynth-${{ matrix.platform_name }}
+        path: |
+          build/WavetableSynth_artefacts/Release/**
+          !build/WavetableSynth_artefacts/Release/*.a
+          !build/WavetableSynth_artefacts/Release/*.lib
+        if-no-files-found: error
