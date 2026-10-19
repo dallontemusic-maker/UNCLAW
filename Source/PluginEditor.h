@@ -19,6 +19,7 @@ public:
     void paint(juce::Graphics&) override;
     void resized() override;
     void buttonClicked(juce::Button* button) override;
+    void showPage(int page);
 
     // juce::FileBrowserListener — выбор файла в дереве браузера
     void selectionChanged() override;
@@ -31,6 +32,7 @@ private:
     void refreshFolderBox(int selectIndex);
     void showFolder(int index);
     void loadFromBrowser(const juce::File& file);
+    void loadExternalWavetable(const juce::File& file, int oscillator);
 
     using APVTS = juce::AudioProcessorValueTreeState;
     using SliderAttachment = APVTS::SliderAttachment;
@@ -55,6 +57,8 @@ private:
 
     juce::TextButton loadOsc1Button { "Load WAV..." };
     juce::TextButton loadOsc2Button { "Load WAV..." };
+    juce::TextButton synthTabButton { "SYNTH" }, effectsTabButton { "EFFECTS" }, arpTabButton { "ARPEGGIATOR" };
+    int currentPage = 0;
 
     // Панель осциллятора: форма, позиция в таблице, громкость, высота, фаза, панорама, юнисон
     struct OscUI {
@@ -65,6 +69,7 @@ private:
         juce::ToggleButton toFilter { "TO FILTER" };
     };
     std::array<OscUI, 2> oscUI;
+    std::array<juce::Rectangle<int>, 2> wavePreviewBounds;
 
     juce::ComboBox subWaveBox;
     juce::Slider subLevelSlider;
@@ -78,6 +83,7 @@ private:
                   filterEnvReleaseSlider, filterEnvAmountSlider;
     juce::Slider masterVolumeSlider, masterPanSlider;
     juce::Rectangle<int> outputMeterBounds;
+    juce::Rectangle<int> filterEnvelopeGraphBounds;
     struct LfoUI {
         juce::ToggleButton enabled { "ON" }, tempoSync { "SYNC" };
         juce::ComboBox destination, waveform, syncDivision;
@@ -89,6 +95,7 @@ private:
     juce::Slider pitchWheelSlider, modWheelSlider;
     juce::ComboBox pitchRangeBox;
     juce::ComboBox revModeBox;
+    juce::ToggleButton revOnButton { "ON" }, delOnButton { "ON" }, satOnButton { "ON" };
     juce::Slider revSizeSlider, revDecaySlider, revToneSlider, revMixSlider;
     juce::ToggleButton delSyncButton { "Sync" };
     juce::ComboBox delNoteBox;
@@ -114,6 +121,8 @@ private:
     juce::DirectoryContentsList folderContents { &waveFilter, scanThread };
     juce::FileTreeComponent folderTree { folderContents };
     juce::TextButton targetOsc1Button { "Osc 1" }, targetOsc2Button { "Osc 2" };
+    juce::TextButton browserToggleButton { "HIDE" };
+    bool browserVisible = true;
     juce::ComboBox folderBox;
     juce::TextButton addFolderButton { "Add Folder..." }, removeFolderButton { "Remove" };
     juce::Label hintLabel, status1Label, status2Label;

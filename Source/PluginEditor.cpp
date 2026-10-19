@@ -24,6 +24,18 @@ WavetableSynthAudioProcessorEditor::WavetableSynthAudioProcessorEditor(Wavetable
         addAndMakeVisible(b);
     }
 
+    for (auto* tab : { &synthTabButton, &effectsTabButton, &arpTabButton }) {
+        tab->setClickingTogglesState(false);
+        tab->setColour(juce::TextButton::buttonColourId, juce::Colour(0xff1d2023));
+        tab->setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff684e2a));
+        tab->setColour(juce::TextButton::textColourOffId, juce::Colour(0xffaaa9a2));
+        tab->setColour(juce::TextButton::textColourOnId, juce::Colour(0xffffdc86));
+        addAndMakeVisible(tab);
+    }
+    synthTabButton.onClick = [this] { showPage(0); };
+    effectsTabButton.onClick = [this] { showPage(1); };
+    arpTabButton.onClick = [this] { showPage(2); };
+
     auto styleCommon = [](juce::Slider& s) {
         s.setColour(juce::Slider::textBoxTextColourId, juce::Colour(0xffd8d5cb));
         s.setColour(juce::Slider::textBoxBackgroundColourId, juce::Colour(0xff111315));
@@ -144,17 +156,20 @@ WavetableSynthAudioProcessorEditor::WavetableSynthAudioProcessorEditor(Wavetable
     modWheelSlider.onValueChange = [this] { audioProcessor.setUiModWheelValue((int) modWheelSlider.getValue()); };
 
     addCombo(revModeBox, "REV_MODE");
+    addToggle(revOnButton, "REV_ON");
     addKnob(revSizeSlider, "REV_SIZE");
     addKnob(revDecaySlider, "REV_DECAY");
     addKnob(revToneSlider, "REV_TONE");
     addKnob(revMixSlider, "REV_MIX");
 
     addToggle(delSyncButton, "DEL_SYNC");
+    addToggle(delOnButton, "DEL_ON");
     addCombo(delNoteBox, "DEL_NOTE");
     addKnob(delToneSlider, "DEL_TONE");
     addKnob(delMixSlider, "DEL_MIX");
 
     addKnob(satDriveSlider, "SAT_DRIVE");
+    addToggle(satOnButton, "SAT_ON");
     addKnob(satMixSlider, "SAT_MIX");
 
     addToggle(arpEnableButton, "ARP_ON");
@@ -179,6 +194,15 @@ WavetableSynthAudioProcessorEditor::WavetableSynthAudioProcessorEditor(Wavetable
     targetOsc1Button.setToggleState(true, juce::dontSendNotification);
     targetOsc1Button.onClick = [this] { targetOsc = 1; };
     targetOsc2Button.onClick = [this] { targetOsc = 2; };
+
+    browserToggleButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff202326));
+    browserToggleButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xffd8d5cb));
+    browserToggleButton.onClick = [this] {
+        browserVisible = !browserVisible;
+        browserToggleButton.setButtonText(browserVisible ? "HIDE" : "SHOW");
+        resized();
+    };
+    addAndMakeVisible(browserToggleButton);
 
     for (auto* b : { &addFolderButton, &removeFolderButton }) {
         b->addListener(this);
@@ -219,7 +243,8 @@ WavetableSynthAudioProcessorEditor::WavetableSynthAudioProcessorEditor(Wavetable
     startTimerHz(20);
     timerCallback();
 
-    setSize(1450, 1220);
+    setSize(1450, 930);
+    showPage(0);
 }
 
 WavetableSynthAudioProcessorEditor::~WavetableSynthAudioProcessorEditor() {
@@ -232,6 +257,42 @@ WavetableSynthAudioProcessorEditor::~WavetableSynthAudioProcessorEditor() {
     addFolderButton.removeListener(this);
     removeFolderButton.removeListener(this);
     scanThread.stopThread(2000);
+}
+
+void WavetableSynthAudioProcessorEditor::showPage(int page) {
+    currentPage = juce::jlimit(0, 2, page);
+    synthTabButton.setToggleState(currentPage == 0, juce::dontSendNotification);
+    effectsTabButton.setToggleState(currentPage == 1, juce::dontSendNotification);
+    arpTabButton.setToggleState(currentPage == 2, juce::dontSendNotification);
+
+    const bool showSynth = currentPage == 0;
+    const bool showEffects = currentPage == 1;
+    const bool showArp = currentPage == 2;
+    auto setVisible = [] (juce::Component& component, bool visible) { component.setVisible(visible); };
+    auto setComponentsVisible = [&] (bool visible, auto&... components) {
+        (setVisible(components, visible), ...);
+    };
+
+    for (auto& osc : oscUI) {
+        setComponentsVisible(showSynth, osc.wave, osc.wtPos, osc.level, osc.oct, osc.semi, osc.fine,
+                             osc.phase, osc.pan, osc.unison, osc.detune, osc.stereo, osc.attack,
+                             osc.decay, osc.sustain, osc.release, osc.analogButton, osc.toFilter);
+    }
+    setComponentsVisible(showSynth, loadOsc1Button, loadOsc2Button, oscilloscope, keyboard, subWaveBox,
+                         subLevelSlider, subAttackSlider, subDecaySlider, subSustainSlider,
+                         subReleaseSlider, subToFilterButton, cutoffSlider, resonanceSlider,
+                         filterOnButton, filterTypeBox, filterEnvAttackSlider, filterEnvDecaySlider,
+                         filterEnvSustainSlider, filterEnvReleaseSlider, filterEnvAmountSlider,
+                         masterVolumeSlider, masterPanSlider, pitchWheelSlider, modWheelSlider,
+                         pitchRangeBox, voiceModeBox, voiceCountBox, glideSlider);
+    for (auto& lfo : lfoUI)
+        setComponentsVisible(showSynth, lfo.enabled, lfo.tempoSync, lfo.destination,
+                             lfo.waveform, lfo.syncDivision, lfo.rate, lfo.depth);
+    setComponentsVisible(showEffects, revModeBox, revSizeSlider, revDecaySlider, revToneSlider,
+                         revMixSlider, revOnButton, delSyncButton, delNoteBox, delToneSlider, delMixSlider,
+                         delOnButton, satDriveSlider, satMixSlider, satOnButton);
+    setComponentsVisible(showArp, arpEnableButton, arpModeBox, arpRateBox, arpOctSlider, arpGateSlider);
+    resized();
 }
 
 void WavetableSynthAudioProcessorEditor::refreshFolderBox(int selectIndex) {
@@ -265,19 +326,31 @@ void WavetableSynthAudioProcessorEditor::selectionChanged() {
 }
 
 void WavetableSynthAudioProcessorEditor::loadFromBrowser(const juce::File& file) {
-    audioProcessor.loadWavetableAsync(file, targetOsc);
+    loadExternalWavetable(file, targetOsc);
+}
 
-    // Чтобы загруженную волну было слышно, переключаем источник этого осциллятора на Wavetable
-    if (auto* prm = audioProcessor.parameters.getParameter(targetOsc == 1 ? "OSC1_WAVE" : "OSC2_WAVE")) {
-        prm->beginChangeGesture();
-        prm->setValueNotifyingHost(0.0f);
-        prm->endChangeGesture();
-    }
+void WavetableSynthAudioProcessorEditor::loadExternalWavetable(const juce::File& file, int oscillator) {
+    juce::Component::SafePointer<WavetableSynthAudioProcessorEditor> safeThis(this);
+    audioProcessor.loadWavetableAsync(file, oscillator, [safeThis, oscillator](bool loaded) {
+        if (safeThis == nullptr || !loaded) return;
+        // Переключаемся на Wavetable только после успешной загрузки. Если формат не подошёл,
+        // пользователь продолжает слышать выбранный ранее источник.
+        if (auto* parameter = safeThis->audioProcessor.parameters.getParameter(
+                oscillator == 1 ? "OSC1_WAVE" : "OSC2_WAVE")) {
+            parameter->beginChangeGesture();
+            parameter->setValueNotifyingHost(0.0f);
+            parameter->endChangeGesture();
+        }
+        safeThis->repaint(safeThis->wavePreviewBounds[(size_t) oscillator - 1]);
+    });
 }
 
 void WavetableSynthAudioProcessorEditor::timerCallback() {
     status1Label.setText("Osc 1: " + audioProcessor.getWavetableStatus(1), juce::dontSendNotification);
     status2Label.setText("Osc 2: " + audioProcessor.getWavetableStatus(2), juce::dontSendNotification);
+    revOnButton.setButtonText(revOnButton.getToggleState() ? "ON" : "OFF");
+    delOnButton.setButtonText(delOnButton.getToggleState() ? "ON" : "OFF");
+    satOnButton.setButtonText(satOnButton.getToggleState() ? "ON" : "OFF");
     repaint(outputMeterBounds.expanded(4));
 }
 
@@ -323,6 +396,42 @@ void WavetableSynthAudioProcessorEditor::paint(juce::Graphics& g) {
         g.setColour(juce::Colour(0xffffc928).withAlpha(0.8f));
         g.fillRoundedRectangle((float) panel.bounds.getX() + 1.0f, (float) panel.bounds.getY() + 9.0f, 2.0f,
                                juce::jmax(20.0f, (float) panel.bounds.getHeight() - 18.0f), 1.0f);
+    }
+    if (!filterEnvelopeGraphBounds.isEmpty()) {
+        const auto graph = filterEnvelopeGraphBounds.toFloat();
+        g.setColour(juce::Colour(0xff101214));
+        g.fillRoundedRectangle(graph, 3.0f);
+        g.setColour(juce::Colour(0xff45494d));
+        g.drawRoundedRectangle(graph, 3.0f, 1.0f);
+        for (int i = 1; i < 4; ++i) {
+            const float x = graph.getX() + graph.getWidth() * (float) i / 4.0f;
+            g.drawVerticalLine((int) x, graph.getY() + 2.0f, graph.getBottom() - 2.0f);
+        }
+        g.setColour(juce::Colour(0xffffc928));
+        juce::Path envelope;
+        envelope.startNewSubPath(graph.getX() + 3.0f, graph.getBottom() - 3.0f);
+        envelope.lineTo(graph.getX() + graph.getWidth() * 0.18f, graph.getY() + 4.0f);
+        envelope.lineTo(graph.getX() + graph.getWidth() * 0.40f, graph.getY() + graph.getHeight() * 0.50f);
+        envelope.lineTo(graph.getX() + graph.getWidth() * 0.72f, graph.getY() + graph.getHeight() * 0.66f);
+        envelope.lineTo(graph.getRight() - 3.0f, graph.getBottom() - 3.0f);
+        g.strokePath(envelope, juce::PathStrokeType(1.5f));
+    }
+    for (size_t osc = 0; osc < wavePreviewBounds.size(); ++osc) {
+        const auto area = wavePreviewBounds[osc].toFloat();
+        if (area.isEmpty()) continue;
+        g.setColour(juce::Colour(0xff111416));
+        g.fillRoundedRectangle(area, 3.0f);
+        g.setColour(juce::Colour(0xff45494d));
+        g.drawRoundedRectangle(area, 3.0f, 1.0f);
+        const auto samples = audioProcessor.getWavetablePreview((int) osc + 1);
+        juce::Path wave;
+        for (size_t i = 0; i < samples.size(); ++i) {
+            const float x = area.getX() + 3.0f + (area.getWidth() - 6.0f) * (float) i / (float) (samples.size() - 1);
+            const float y = area.getCentreY() - samples[i] * (area.getHeight() * 0.38f);
+            if (i == 0) wave.startNewSubPath(x, y); else wave.lineTo(x, y);
+        }
+        g.setColour(juce::Colour(0xffffc928));
+        g.strokePath(wave, juce::PathStrokeType(1.25f));
     }
     if (!outputMeterBounds.isEmpty()) {
         g.setColour(juce::Colour(0xff111315));
@@ -374,7 +483,7 @@ void WavetableSynthAudioProcessorEditor::paint(juce::Graphics& g) {
     g.setFont(juce::FontOptions(9.5f));
     g.drawText("ANALOG ENGINE  ·  2 OSC  ·  SUB", getWidth() - 310, 25, 265, 15, juce::Justification::centredRight);
     g.setColour(juce::Colour(0xff383b3e));
-    g.drawVerticalLine(250, 58.0f, (float) getHeight());
+    g.drawVerticalLine(browserVisible ? 250.0f : 48.0f, 58.0f, (float) getHeight());
 
     for (const auto& c : captions) {
         switch (c.kind) {
@@ -402,36 +511,113 @@ void WavetableSynthAudioProcessorEditor::paint(juce::Graphics& g) {
 void WavetableSynthAudioProcessorEditor::resized() {
     captions.clear();
     panels.clear();
+    filterEnvelopeGraphBounds = juce::Rectangle<int>();
+    wavePreviewBounds.fill(juce::Rectangle<int>());
     auto bounds = getLocalBounds();
 
     // ---------------- браузер (слева) ----------------
-    auto browser = bounds.removeFromLeft(250).reduced(12, 68);
-    addSection("WAVEFORM BROWSER", browser.removeFromTop(20));
-    browser.removeFromTop(8);
+    const int browserWidth = browserVisible ? 250 : 48;
+    auto browser = bounds.removeFromLeft(browserWidth);
+    if (browserVisible) {
+        browser = browser.reduced(12, 68);
+        auto browserTitle = browser.removeFromTop(20);
+        addSection("WAVEFORM BROWSER", browserTitle);
+        browser.removeFromTop(8);
 
-    auto targetRow = browser.removeFromTop(26);
-    captions.push_back({ targetRow.removeFromLeft(72), "Load into:", CaptionKind::Side });
-    targetOsc1Button.setBounds(targetRow.removeFromLeft(targetRow.getWidth() / 2).reduced(2, 0));
-    targetOsc2Button.setBounds(targetRow.reduced(2, 0));
-    browser.removeFromTop(8);
+        auto targetRow = browser.removeFromTop(26);
+        captions.push_back({ targetRow.removeFromLeft(72), "Load into:", CaptionKind::Side });
+        targetOsc1Button.setBounds(targetRow.removeFromLeft(targetRow.getWidth() / 2).reduced(2, 0));
+        targetOsc2Button.setBounds(targetRow.reduced(2, 0));
+        browser.removeFromTop(8);
 
-    folderBox.setBounds(browser.removeFromTop(26));
-    browser.removeFromTop(6);
-    auto folderButtons = browser.removeFromTop(26);
-    addFolderButton.setBounds(folderButtons.removeFromLeft(folderButtons.getWidth() * 3 / 5).reduced(2, 0));
-    removeFolderButton.setBounds(folderButtons.reduced(2, 0));
-    browser.removeFromTop(8);
+        folderBox.setBounds(browser.removeFromTop(26));
+        browser.removeFromTop(6);
+        auto folderButtons = browser.removeFromTop(26);
+        addFolderButton.setBounds(folderButtons.removeFromLeft(folderButtons.getWidth() * 3 / 5).reduced(2, 0));
+        removeFolderButton.setBounds(folderButtons.reduced(2, 0));
+        browser.removeFromTop(8);
 
-    auto statusArea = browser.removeFromBottom(64);
-    statusArea.removeFromTop(6);
-    status1Label.setBounds(statusArea.removeFromTop(28));
-    status2Label.setBounds(statusArea.removeFromTop(28));
-    folderTree.setBounds(browser);
-    hintLabel.setBounds(browser.reduced(6));
+        auto statusArea = browser.removeFromBottom(64);
+        statusArea.removeFromTop(6);
+        status1Label.setBounds(statusArea.removeFromTop(28));
+        status2Label.setBounds(statusArea.removeFromTop(28));
+        folderTree.setBounds(browser);
+        hintLabel.setBounds(browser.reduced(6));
+        browserToggleButton.setButtonText("HIDE");
+        browserToggleButton.setBounds(browserWidth - 54, 68, 42, 18);
+    } else {
+        browserToggleButton.setButtonText("SHOW");
+        browserToggleButton.setBounds(3, 68, browserWidth - 6, 22);
+    }
+    juce::Component* browserComponents[] { &targetOsc1Button, &targetOsc2Button, &folderBox,
+        &addFolderButton, &removeFolderButton, &folderTree, &hintLabel, &status1Label, &status2Label };
+    for (auto* component : browserComponents)
+        component->setVisible(browserVisible);
+
+    const int tabsX = browserWidth + 17;
+    synthTabButton.setBounds(tabsX, 16, 72, 28);
+    effectsTabButton.setBounds(tabsX + 76, 16, 82, 28);
+    arpTabButton.setBounds(tabsX + 162, 16, 116, 28);
 
     auto area = bounds.reduced(20);
-    area.removeFromTop(38);                                   // резерв для аппаратной шапки
-    area.removeFromTop(4);
+    area.removeFromTop(42);                                   // аппаратная шапка и вкладки
+
+    if (currentPage == 1) {
+        auto title = area.removeFromTop(24);
+        auto fxRow = area.removeFromTop(132);
+        const int fxGap = 14;
+        auto reverb = fxRow.removeFromLeft(405); fxRow.removeFromLeft(fxGap);
+        auto delay = fxRow.removeFromLeft(335); fxRow.removeFromLeft(fxGap);
+        auto saturation = fxRow;
+        auto titleFor = [&](juce::Rectangle<int> g) { return juce::Rectangle<int>(g.getX(), title.getY(), g.getWidth() - 52, title.getHeight()); };
+        addSection("REVERB", titleFor(reverb));
+        addSection("DELAY", titleFor(delay));
+        addSection("SATURATION", titleFor(saturation));
+        revOnButton.setBounds(reverb.getRight() - 48, title.getY() - 1, 48, 20);
+        delOnButton.setBounds(delay.getRight() - 48, title.getY() - 1, 48, 20);
+        satOnButton.setBounds(saturation.getRight() - 48, title.getY() - 1, 48, 20);
+        panels.push_back({ reverb.withY(fxRow.getY()).withHeight(132), juce::Colour(0xff292c2f) });
+        panels.push_back({ delay.withY(fxRow.getY()).withHeight(132), juce::Colour(0xff292c2f) });
+        panels.push_back({ saturation.withY(fxRow.getY()).withHeight(132), juce::Colour(0xff292c2f) });
+
+        placeCombo(revModeBox, "Mode", reverb.removeFromLeft(94).reduced(3, 4));
+        reverb.removeFromLeft(4);
+        placeKnob(revSizeSlider, "Size", reverb.removeFromLeft(70));
+        placeKnob(revDecaySlider, "Decay", reverb.removeFromLeft(70));
+        placeKnob(revToneSlider, "Tone", reverb.removeFromLeft(70));
+        placeKnob(revMixSlider, "Mix", reverb.removeFromLeft(70));
+
+        auto delaySync = delay.removeFromLeft(126).reduced(4, 6);
+        delSyncButton.setBounds(delaySync.removeFromTop(26));
+        delaySync.removeFromTop(8);
+        delNoteBox.setBounds(delaySync.removeFromTop(26));
+        delay.removeFromLeft(4);
+        placeKnob(delToneSlider, "Tone", delay.removeFromLeft(82));
+        placeKnob(delMixSlider, "Mix", delay.removeFromLeft(82));
+        placeKnob(satDriveSlider, "Drive", saturation.removeFromLeft(82));
+        placeKnob(satMixSlider, "Mix", saturation.removeFromLeft(82));
+        return;
+    }
+
+    if (currentPage == 2) {
+        auto title = area.removeFromTop(24);
+        auto arpPanel = area.removeFromTop(156);
+        addSection("ARPEGGIATOR", title);
+        panels.push_back({ arpPanel, juce::Colour(0xff292c2f) });
+        arpPanel.reduce(14, 12);
+        auto onCell = arpPanel.removeFromLeft(100);
+        captions.push_back({ onCell.removeFromTop(14), "ENABLE", CaptionKind::Knob });
+        arpEnableButton.setBounds(onCell.removeFromTop(28));
+        arpPanel.removeFromLeft(18);
+        placeCombo(arpModeBox, "Mode", arpPanel.removeFromLeft(145));
+        arpPanel.removeFromLeft(16);
+        placeCombo(arpRateBox, "Rate", arpPanel.removeFromLeft(130));
+        arpPanel.removeFromLeft(16);
+        placeKnob(arpOctSlider, "Octaves", arpPanel.removeFromLeft(90));
+        arpPanel.removeFromLeft(10);
+        placeKnob(arpGateSlider, "Gate", arpPanel.removeFromLeft(90));
+        return;
+    }
 
     constexpr int kCompactRow = 70;
 
@@ -452,6 +638,7 @@ void WavetableSynthAudioProcessorEditor::resized() {
         sourceControls.removeFromLeft(8);
         auto& loadBtn = (n == 0) ? loadOsc1Button : loadOsc2Button;
         loadBtn.setBounds(sourceControls.removeFromLeft(118).withHeight(26).withY(sourceControls.getY() + 4));
+        wavePreviewBounds[(size_t) n] = sourceControls.reduced(2, 3);
 
         auto rowA = card.removeFromTop(kCompactRow);
         const int knobWidth = rowA.getWidth() / 5;
@@ -521,14 +708,15 @@ void WavetableSynthAudioProcessorEditor::resized() {
     panels.push_back({ filterG.withY(shapeY).withHeight(220), juce::Colour(0xff292c2f) });
     panels.push_back({ masterG.withY(shapeY).withHeight(220), juce::Colour(0xff292c2f) });
 
-    auto filterHeader = filterG.removeFromTop(30);
+    auto filterHeader = filterG.removeFromTop(28);
     filterOnButton.setBounds(filterHeader.removeFromLeft(112).reduced(2, 2));
     filterTypeBox.setBounds(filterHeader.reduced(2, 2));
-    auto filterControls = filterG.removeFromTop(kKnobRow);
+    auto filterControls = filterG.removeFromTop(64);
     placeCompactKnob(cutoffSlider, "Cutoff", filterControls.removeFromLeft(filterControls.getWidth() / 2));
     placeCompactKnob(resonanceSlider, "Resonance", filterControls);
-    addSection("FILTER ENVELOPE (ADSR)", filterG.removeFromTop(18));
-    auto filterEnvKnobs = filterG.removeFromTop(kKnobRow);
+    addSection("FILTER ENVELOPE (ADSR)", filterG.removeFromTop(16));
+    filterEnvelopeGraphBounds = filterG.removeFromTop(36).reduced(6, 1);
+    auto filterEnvKnobs = filterG.removeFromTop(70);
     placeCompactKnob(filterEnvAttackSlider, "Attack", filterEnvKnobs.removeFromLeft(filterEnvKnobs.getWidth() / 5));
     placeCompactKnob(filterEnvDecaySlider, "Decay", filterEnvKnobs.removeFromLeft(filterEnvKnobs.getWidth() / 4));
     placeCompactKnob(filterEnvSustainSlider, "Sustain", filterEnvKnobs.removeFromLeft(filterEnvKnobs.getWidth() / 3));
@@ -570,56 +758,6 @@ void WavetableSynthAudioProcessorEditor::resized() {
     }
 
     area.removeFromTop(8);
-
-    // ---------------- эффекты ----------------
-    auto fxTitleRow = area.removeFromTop(20);
-    auto fxRow = area.removeFromTop(kKnobRow);
-    auto revGroup = fxRow.removeFromLeft(351);  fxRow.removeFromLeft(20);
-    auto delGroup = fxRow.removeFromLeft(268);  fxRow.removeFromLeft(20);
-    auto satGroup = fxRow.removeFromLeft(128);
-
-    auto fxSpan = [&](juce::Rectangle<int> g) { return juce::Rectangle<int>(g.getX(), fxTitleRow.getY(), g.getWidth(), fxTitleRow.getHeight()); };
-    addSection("REVERB", fxSpan(revGroup));
-    addSection("DELAY", fxSpan(delGroup));
-    addSection("SATURATION", fxSpan(satGroup));
-
-    placeCombo(revModeBox, "Mode", revGroup.removeFromLeft(85));
-    revGroup.removeFromLeft(10);
-    placeKnob(revSizeSlider, "Size", revGroup.removeFromLeft(64));
-    placeKnob(revDecaySlider, "Decay", revGroup.removeFromLeft(64));
-    placeKnob(revToneSlider, "Tone", revGroup.removeFromLeft(64));
-    placeKnob(revMixSlider, "Mix", revGroup.removeFromLeft(64));
-
-    auto delCol = delGroup.removeFromLeft(130);
-    delSyncButton.setBounds(delCol.removeFromTop(24));
-    delCol.removeFromTop(8);
-    delNoteBox.setBounds(delCol.removeFromTop(24));
-    delGroup.removeFromLeft(10);
-    placeKnob(delToneSlider, "Tone", delGroup.removeFromLeft(64));
-    placeKnob(delMixSlider, "Mix", delGroup.removeFromLeft(64));
-
-    placeKnob(satDriveSlider, "Drive", satGroup.removeFromLeft(64));
-    placeKnob(satMixSlider, "Mix", satGroup.removeFromLeft(64));
-
-    area.removeFromTop(8);
-
-    // ---------------- арпеджиатор ----------------
-    auto arpTitleRow = area.removeFromTop(20);
-    auto arpRow = area.removeFromTop(kKnobRow);
-    auto arpG = arpRow.removeFromLeft(453);
-    addSection("ARPEGGIATOR", juce::Rectangle<int>(arpG.getX(), arpTitleRow.getY(), arpG.getWidth(), arpTitleRow.getHeight()));
-
-    auto onCell = arpG.removeFromLeft(90);
-    onCell.removeFromTop(14);
-    arpEnableButton.setBounds(onCell.removeFromTop(24));
-    arpG.removeFromLeft(15);
-    placeCombo(arpModeBox, "Mode", arpG.removeFromLeft(95));
-    arpG.removeFromLeft(15);
-    placeCombo(arpRateBox, "Rate", arpG.removeFromLeft(80));
-    arpG.removeFromLeft(15);
-    placeKnob(arpOctSlider, "Octaves", arpG.removeFromLeft(64));
-    arpG.removeFromLeft(15);
-    placeKnob(arpGateSlider, "Gate", arpG.removeFromLeft(64));
 
     area.removeFromTop(8);
     addSection("PERFORMANCE", area.removeFromTop(20));
@@ -682,11 +820,6 @@ void WavetableSynthAudioProcessorEditor::buttonClicked(juce::Button* button) {
         [safeThis, targetOsc](const juce::FileChooser& fc) {
             if (safeThis == nullptr) return;
             auto file = fc.getResult();
-            if (file.existsAsFile()) {
-                safeThis->audioProcessor.loadWavetableAsync(file, targetOsc);
-                if (auto* prm = safeThis->audioProcessor.parameters.getParameter(targetOsc == 1 ? "OSC1_WAVE" : "OSC2_WAVE")) {
-                    prm->beginChangeGesture(); prm->setValueNotifyingHost(0.0f); prm->endChangeGesture();
-                }
-            }
+            if (file.existsAsFile()) safeThis->loadExternalWavetable(file, targetOsc);
         });
 }

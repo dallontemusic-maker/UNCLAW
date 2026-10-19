@@ -3,6 +3,7 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_dsp/juce_dsp.h>
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <vector>
 #include "WavetableOscillator.h"
@@ -44,9 +45,11 @@ public:
     // Загрузка вейвтейбла из аудиофайла для осциллятора 1 или 2.
     // loadCustomWavetable читает файл в вызывающем потоке; loadWavetableAsync делает это в фоне (для браузера).
     bool loadCustomWavetable(const juce::File& file, int oscIndex);
-    void loadWavetableAsync(const juce::File& file, int oscIndex);
+    void loadWavetableAsync(const juce::File& file, int oscIndex,
+                            std::function<void(bool)> completion = {});
     juce::String getWavetableStatus(int oscIndex) const;   // текст для интерфейса: что загружено / почему не вышло
     juce::File getWavetableFile(int oscIndex) const;
+    std::array<float, 64> getWavetablePreview(int oscIndex);
     std::vector<float> oscilloscopeBuffer;
 
 private:
@@ -92,6 +95,7 @@ private:
     Delay delayLine;
     std::array<float, 2> delayLowpass {};
     juce::SmoothedValue<float> delayTimeSm;
+    bool delayWasEnabled = true;
     double currentSampleRate = 44100.0;
 
     // Вейвтейблы: GUI-поток кладёт новые таблицы под замком, аудио-поток забирает их try-lock'ом.

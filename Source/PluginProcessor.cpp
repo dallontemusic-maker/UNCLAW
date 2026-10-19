@@ -478,17 +478,20 @@ juce::AudioProcessorValueTreeState::ParameterLayout WavetableSynthAudioProcessor
     params.push_back(std::make_unique<juce::AudioParameterChoice>("PITCH_RANGE", "Pitch Bend Range", juce::StringArray { "±2 semitones", "±12 semitones", "±24 semitones" }, 0));
 
     params.push_back(std::make_unique<juce::AudioParameterChoice>("REV_MODE", "Reverb Mode", juce::StringArray{"Ambience", "Room", "Hall", "Plate"}, 1));
+    params.push_back(std::make_unique<juce::AudioParameterBool>("REV_ON", "Reverb On", true));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("REV_SIZE", "Reverb Size", 0.0f, 1.0f, 0.5f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("REV_DECAY", "Reverb Decay", 0.1f, 10.0f, 2.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("REV_TONE", "Reverb Tone", 200.0f, 20000.0f, 5000.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("REV_MIX", "Reverb Mix", 0.0f, 1.0f, 0.3f));
 
     params.push_back(std::make_unique<juce::AudioParameterBool>("DEL_SYNC", "Delay Sync", true));
+    params.push_back(std::make_unique<juce::AudioParameterBool>("DEL_ON", "Delay On", true));
     params.push_back(std::make_unique<juce::AudioParameterChoice>("DEL_NOTE", "Delay Note", juce::StringArray{"1/32", "1/16", "1/8", "1/4"}, 2));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("DEL_TONE", "Delay Tone", 200.0f, 20000.0f, 4000.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("DEL_MIX", "Delay Mix", 0.0f, 1.0f, 0.2f));
 
     params.push_back(std::make_unique<juce::AudioParameterFloat>("SAT_DRIVE", "Saturation Drive", 1.0f, 10.0f, 1.5f));
+    params.push_back(std::make_unique<juce::AudioParameterBool>("SAT_ON", "Saturation On", true));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("SAT_MIX", "Saturation Mix", 0.0f, 1.0f, 0.5f));
 
     params.push_back(std::make_unique<juce::AudioParameterBool>("ARP_ON", "Arp On", false));
@@ -517,6 +520,7 @@ void WavetableSynthAudioProcessor::prepareToPlay (double sampleRate, int samples
     delayLine.prepare(spec);
     delayLine.reset();
     delayLowpass.fill(0.0f);
+    delayWasEnabled = true;
     delayTimeSm.reset(sampleRate, 0.15);
     delayTimeSm.setCurrentAndTargetValue((float) (0.3 * sampleRate));
 
@@ -742,13 +746,15 @@ void WavetableSynthAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
     synth.renderNextBlock(buffer, midiMessages, 0, numSamples);
 
     // --- сатурация ---
-    const float satDrive = get("SAT_DRIVE");
-    const float satMix = get("SAT_MIX");
-    for (int ch = 0; ch < numChannels; ++ch) {
-        float* data = buffer.getWritePointer(ch);
-        for (int i = 0; i < numSamples; ++i) {
-            const float clean = data[i];
-            data[i] = clean * (1.0f - satMix) + std::tanh(clean * satDrive) * satMix;
+    if (get("SAT_ON") > 0.5f) {
+        const float satDrive = get("SAT_DRIVE");
+        const float satMix = get("SAT_MIX");
+        for (int ch = 0; ch < numChannels; ++ch) {
+            float* data = buffer.getWritePointer(ch);
+            for (int i = 0; i < numSamples; ++i) {
+                const float clean = data[i];
+                data[i] = clean * (1.0f - satMix) + std::tanh(clean * satDrive) * satMix;
+            }
         }
     }
 
@@ -766,33 +772,43 @@ void WavetableSynthAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
     const int fxCh = juce::jmin(numChannels, 2);
     constexpr float feedback = 0.4f;
 
-    for (int i = 0; i < numSamples; ++i) {
-        const float d = delayTimeSm.getNextValue();
-        for (int ch = 0; ch < fxCh; ++ch) {
-            float* data = buffer.getWritePointer(ch);
-            const float in = data[i];
-            const float delayed = delayLine.popSample(ch, d, true);
-            auto& lp = delayLowpass[(size_t) ch];
-            lp += toneCoef * (delayed - lp);
-            delayLine.pushSample(ch, in + lp * feedback);
-            data[i] = in + lp * delMix;
+    const bool delayEnabled = get("DEL_ON") > 0.5f;
+    if (!delayEnabled && delayWasEnabled) {
+        delayLine.reset();
+        delayLowpass.fill(0.0f);
+    }
+    delayWasEnabled = delayEnabled;
+    if (delayEnabled) {
+        for (int i = 0; i < numSamples; ++i) {
+            const float d = delayTimeSm.getNextValue();
+            for (int ch = 0; ch < fxCh; ++ch) {
+                float* data = buffer.getWritePointer(ch);
+                const float in = data[i];
+                const float delayed = delayLine.popSample(ch, d, true);
+                auto& lp = delayLowpass[(size_t) ch];
+                lp += toneCoef * (delayed - lp);
+                delayLine.pushSample(ch, in + lp * feedback);
+                data[i] = in + lp * delMix;
+            }
         }
     }
 
     // --- ревербератор: Size -> roomSize, Tone -> damping (выше тон = меньше демпфирования) ---
-    const float revMix = get("REV_MIX");
-    juce::dsp::Reverb::Parameters revParams;
-    revParams.roomSize = get("REV_SIZE");
-    revParams.damping = juce::jlimit(0.0f, 1.0f, 1.0f - std::log(get("REV_TONE") / 200.0f) / std::log(100.0f));
-    revParams.wetLevel = revMix;
-    revParams.dryLevel = 1.0f - revMix;
-    revParams.width = 1.0f;
-    revParams.freezeMode = 0.0f;
-    reverb.setParameters(revParams);
+    if (get("REV_ON") > 0.5f) {
+        const float revMix = get("REV_MIX");
+        juce::dsp::Reverb::Parameters revParams;
+        revParams.roomSize = get("REV_SIZE");
+        revParams.damping = juce::jlimit(0.0f, 1.0f, 1.0f - std::log(get("REV_TONE") / 200.0f) / std::log(100.0f));
+        revParams.wetLevel = revMix;
+        revParams.dryLevel = 1.0f - revMix;
+        revParams.width = 1.0f;
+        revParams.freezeMode = 0.0f;
+        reverb.setParameters(revParams);
 
-    juce::dsp::AudioBlock<float> block(buffer);
-    juce::dsp::ProcessContextReplacing<float> context(block);
-    reverb.process(context);
+        juce::dsp::AudioBlock<float> block(buffer);
+        juce::dsp::ProcessContextReplacing<float> context(block);
+        reverb.process(context);
+    }
 
     // Master volume and stereo balance are applied after the effects chain.
     const float masterVolume = get("MASTER_VOLUME");
@@ -991,6 +1007,19 @@ juce::File WavetableSynthAudioProcessor::getWavetableFile(int oscIndex) const {
     return loadedFile[oscIndex == 1 ? 0 : 1];
 }
 
+std::array<float, 64> WavetableSynthAudioProcessor::getWavetablePreview(int oscIndex) {
+    std::array<float, 64> preview {};
+    const juce::SpinLock::ScopedLockType lock(wavetableLock);
+    const auto& table = oscIndex == 1 ? wavetable1 : wavetable2;
+    if (table == nullptr || table->empty() || table->front().empty()) return preview;
+    const auto& frame = table->front();
+    for (size_t i = 0; i < preview.size(); ++i) {
+        const size_t index = i * frame.size() / preview.size();
+        preview[i] = frame[juce::jmin(index, frame.size() - 1)];
+    }
+    return preview;
+}
+
 bool WavetableSynthAudioProcessor::loadCustomWavetable(const juce::File& file, int oscIndex) {
     const int idx = (oscIndex == 1) ? 0 : 1;
     auto fail = [&] (const juce::String& why) {
@@ -1005,17 +1034,24 @@ bool WavetableSynthAudioProcessor::loadCustomWavetable(const juce::File& file, i
     if (reader->lengthInSamples <= 0 || reader->numChannels == 0) return fail("file is empty");
 
     const int totalSamples = (int) std::min<juce::int64>(reader->lengthInSamples, (juce::int64) 1 << 24);
-    juce::AudioBuffer<float> temp((int) reader->numChannels, totalSamples);
+    const int readableChannels = juce::jlimit(1, 2, (int) reader->numChannels);
+    juce::AudioBuffer<float> temp(readableChannels, totalSamples);
     temp.clear();
     if (!reader->read(&temp, 0, totalSamples, 0, true, true)) return fail("read error");
 
-    // Сводим все каналы в моно (раньше брался только левый)
+    // Не складываем L и R напрямую: в некоторых сторонних таблицах каналы
+    // записаны в противофазе, и обычное суммирование превращает их в тишину.
     std::vector<float> mono((size_t) totalSamples, 0.0f);
-    const float chGain = 1.0f / (float) temp.getNumChannels();
+    int bestChannel = 0;
+    float bestPeak = 0.0f;
     for (int ch = 0; ch < temp.getNumChannels(); ++ch) {
+        float peak = 0.0f;
         const float* src = temp.getReadPointer(ch);
-        for (int i = 0; i < totalSamples; ++i) mono[(size_t) i] += src[i] * chGain;
+        for (int i = 0; i < totalSamples; ++i) peak = juce::jmax(peak, std::abs(src[i]));
+        if (peak > bestPeak) { bestPeak = peak; bestChannel = ch; }
     }
+    const float* source = temp.getReadPointer(bestChannel);
+    std::copy(source, source + totalSamples, mono.begin());
     for (float x : mono)
         if (!std::isfinite(x)) return fail("file contains invalid data");
 
@@ -1039,8 +1075,15 @@ bool WavetableSynthAudioProcessor::loadCustomWavetable(const juce::File& file, i
     return true;
 }
 
-void WavetableSynthAudioProcessor::loadWavetableAsync(const juce::File& file, int oscIndex) {
-    loadPool.addJob([this, file, oscIndex] { loadCustomWavetable(file, oscIndex); });
+void WavetableSynthAudioProcessor::loadWavetableAsync(const juce::File& file, int oscIndex,
+                                                       std::function<void(bool)> completion) {
+    loadPool.addJob([this, file, oscIndex, completion = std::move(completion)]() mutable {
+        const bool loaded = loadCustomWavetable(file, oscIndex);
+        if (completion)
+            juce::MessageManager::callAsync([completion = std::move(completion), loaded]() mutable {
+                completion(loaded);
+            });
+    });
 }
 
 void WavetableSynthAudioProcessor::getStateInformation (juce::MemoryBlock& destData) {
