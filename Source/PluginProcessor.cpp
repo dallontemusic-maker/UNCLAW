@@ -727,7 +727,7 @@ void WavetableSynthAudioProcessor::setStateInformation (const void* data, int si
 }
 
 juce::AudioProcessorEditor* WavetableSynthAudioProcessor::createEditor() {
-    return new WavetableSynthAudioProcessorEditor (*this);
+    return new AudioPluginAudioProcessorEditor (*this);
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() {
