@@ -1,18 +1,27 @@
 # UNCLAW Wavetable Synth
 
-A JUCE-based wavetable synthesizer plugin. It builds as VST3 and Standalone on Windows, macOS, and Linux, and as AU on macOS.
+Cross-platform JUCE instrument plug-in with wavetable oscillators, a sub oscillator, envelopes, filters, two LFOs, effects, an arpeggiator, and an on-screen keyboard.
 
-## GitHub Actions
+## Formats
 
-Push this folder to a GitHub repository. The workflow in `.github/workflows/build.yml` builds the plugin when you push to `main` or `master`, open a pull request against either branch, or start the workflow manually. Download build results from the run's **Artifacts** section.
+- VST3 and Standalone on Windows, macOS, and Linux
+- AU on macOS
 
-## Local build
+The project downloads JUCE 8.0.4 with CMake FetchContent during configuration, so the first configure needs network access.
 
-Requirements: CMake 3.22 or newer, a C++17 compiler supported by JUCE 8, Git, and network access for the first configure (CMake downloads JUCE 8.0.4). On Linux, install JUCE's ALSA, FreeType, Fontconfig, X11, XRandR, Xinerama, XCursor, Xext, Xi, and OpenGL development packages.
+## Build locally
+
+Requirements: CMake 3.22 or newer and a C++17 compiler. Linux also needs the JUCE system development packages used by the GitHub Actions workflow.
 
 ```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release --parallel 4
 ```
 
-Build products are placed under `build/WavetableSynth_artefacts/Release/`.
+On macOS, the plug-in formats are VST3, AU, and Standalone. On Windows and Linux, they are VST3 and Standalone.
+
+## Build with GitHub Actions
+
+Push the project to GitHub and run the **Build Wavetable Synthesizer** workflow. It builds Windows, macOS, and Linux artifacts. The workflow also supports manual runs from the Actions tab. Download the platform artifact from the completed workflow run.
+
+Build outputs are placed under `build/WavetableSynth_artefacts/Release/`.

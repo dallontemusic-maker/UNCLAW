@@ -14,14 +14,30 @@ struct OscSettings {
     int wave = 0, octave = 0, semi = 0, unison = 1;
     float wtPos = 0.0f, level = 1.0f, pan = 0.0f, stereo = 0.7f;
     float detuneCents = 25.0f, fineCents = 0.0f, phaseDeg = 0.0f;
+    bool filterOn = true, analogMode = false;
+};
+
+struct LfoSettings {
+    int destination = 0, waveform = 0, syncDivision = 2;
+    float rateHz = 2.0f, depth = 0.2f;
+    bool enabled = false, tempoSync = false;
 };
 
 struct VoiceParams {
     std::array<OscSettings, 2> osc;
     int subWave = 2;
     float subLevel = 0.0f;
+    bool subFilterOn = true;
     float cutoff = 1000.0f, resonance = 1.0f;
-    juce::ADSR::Parameters adsr;
+    bool filterEnabled = true;
+    int filterType = 0;
+    float pitchBendRange = 2.0f;
+    std::array<juce::ADSR::Parameters, 2> ampEnvelopes;
+    juce::ADSR::Parameters subAmpEnvelope;
+    std::array<LfoSettings, 2> lfos;
+    float bpm = 120.0f;
+    juce::ADSR::Parameters filterAdsr;
+    float filterEnvAmountSemitones = 0.0f;
 };
 
 WavetableOscillator::Source toSource(int idx) {
@@ -77,6 +93,10 @@ public:
     void startNote (int midiNoteNumber, float velocity, juce::SynthesiserSound*, int) override {
         baseFreq = (float) juce::MidiMessage::getMidiNoteInHertz(midiNoteNumber);
         velocityGain = velocity;
+        for (size_t oscIndex = 0; oscIndex < units.size(); ++oscIndex)
+            analogDriftCents[oscIndex] = units[oscIndex].s.analogMode
+                ? (random.nextFloat() * 2.0f - 1.0f) * 1.2f
+                : 0.0f;
         updateFrequencies();
 
         for (auto& u : units) {
@@ -91,17 +111,28 @@ public:
         }
         sub.setFrequency(baseFreq * 0.5f);   // Sub звучит на октаву ниже
         sub.resetPhase();
-        filter.reset();
-        adsr.noteOn();
+        for (auto& f : filters) f.reset();
+        for (auto& env : ampEnvelopes) env.noteOn();
+        subAmpEnvelope.noteOn();
+        filterAdsr.noteOn();
+        lfoPhase.fill(0.0f);
     }
 
     void stopNote (float, bool allowTailOff) override {
-        adsr.noteOff();
-        if (!allowTailOff || !adsr.isActive()) clearCurrentNote();
+        for (auto& env : ampEnvelopes) env.noteOff();
+        subAmpEnvelope.noteOff();
+        filterAdsr.noteOff();
+        if (!allowTailOff || (!ampEnvelopes[0].isActive() && !ampEnvelopes[1].isActive()
+                              && !subAmpEnvelope.isActive())) clearCurrentNote();
     }
 
-    void pitchWheelMoved (int) override {}
-    void controllerMoved (int, int) override {}
+    void pitchWheelMoved (int value) override {
+        pitchWheel = juce::jlimit(0, 16383, value);
+        updateFrequencies();
+    }
+    void controllerMoved (int controller, int value) override {
+        if (controller == 1) modWheel = juce::jlimit(0, 127, value) / 127.0f;
+    }
 
     void prepareToPlay(double sampleRate, int samplesPerBlock, int outputChannels) {
         currentSampleRate = sampleRate;
@@ -109,14 +140,18 @@ public:
         for (auto& u : units)
             for (auto& v : u.voices) v.prepare(sampleRate);
         sub.prepare(sampleRate);
-        adsr.setSampleRate(sampleRate);
+        for (auto& env : ampEnvelopes) env.setSampleRate(sampleRate);
+        subAmpEnvelope.setSampleRate(sampleRate);
+        filterAdsr.setSampleRate(sampleRate);
 
         juce::dsp::ProcessSpec spec;
         spec.sampleRate = sampleRate;
         spec.maximumBlockSize = (juce::uint32) samplesPerBlock;
         spec.numChannels = (juce::uint32) juce::jmax(2, outputChannels);
-        filter.prepare(spec);
-        filter.setType(juce::dsp::StateVariableTPTFilterType::lowpass);
+        for (auto& f : filters) {
+            f.prepare(spec);
+            f.setType(juce::dsp::StateVariableTPTFilterType::lowpass);
+        }
     }
 
     void setWavetables(const std::shared_ptr<const WaveTable>& wt1, const std::shared_ptr<const WaveTable>& wt2) {
@@ -136,14 +171,37 @@ public:
                 v.setSource(toSource(u.s.wave));
                 v.setWavetablePosition(u.s.wtPos);
             }
+            ampEnvelopes[i].setParameters(p.ampEnvelopes[i]);
+            filters[i].setCutoffFrequency(juce::jlimit(20.0f, (float)(0.45 * currentSampleRate), p.cutoff));
+            filters[i].setResonance(p.resonance);
+            filters[i].setType(p.filterType == 1 ? juce::dsp::StateVariableTPTFilterType::bandpass
+                                : (p.filterType == 2 ? juce::dsp::StateVariableTPTFilterType::highpass
+                                                     : juce::dsp::StateVariableTPTFilterType::lowpass));
         }
+        filters[2].setCutoffFrequency(juce::jlimit(20.0f, (float)(0.45 * currentSampleRate), p.cutoff));
+        filters[2].setResonance(p.resonance);
+        filters[2].setType(p.filterType == 1 ? juce::dsp::StateVariableTPTFilterType::bandpass
+                              : (p.filterType == 2 ? juce::dsp::StateVariableTPTFilterType::highpass
+                                                   : juce::dsp::StateVariableTPTFilterType::lowpass));
         updateFrequencies();
 
         sub.setSource(toSubSource(p.subWave));
         subLevel = p.subLevel;
-        filter.setCutoffFrequency(juce::jlimit(20.0f, (float)(0.45 * currentSampleRate), p.cutoff));
-        filter.setResonance(p.resonance);
-        adsr.setParameters(p.adsr);
+        subFilterOn = p.subFilterOn;
+        subAmpEnvelope.setParameters(p.subAmpEnvelope);
+        for (size_t i = 0; i < lfoSettings.size(); ++i) {
+            lfoSettings[i] = p.lfos[i];
+            if (lfoSettings[i].tempoSync) {
+                static constexpr float beatRates[] { 0.25f, 0.5f, 1.0f, 2.0f, 4.0f };
+                const int division = juce::jlimit(0, 4, lfoSettings[i].syncDivision);
+                lfoSettings[i].rateHz = juce::jmax(0.001f, p.bpm / 60.0f * beatRates[division]);
+            }
+        }
+        filterBaseCutoff = juce::jlimit(20.0f, (float)(0.45 * currentSampleRate), p.cutoff);
+        filterEnabled = p.filterEnabled;
+        pitchBendRange = p.pitchBendRange;
+        filterAdsr.setParameters(p.filterAdsr);
+        filterEnvAmountSemitones = p.filterEnvAmountSemitones;
     }
 
     void renderNextBlock (juce::AudioBuffer<float>& outputBuffer, int startSample, int numSamples) override {
@@ -152,32 +210,77 @@ public:
 
         for (int i = 0; i < numSamples; ++i) {
             float left = 0.0f, right = 0.0f;
+            const float filterEnv = filterAdsr.getNextSample();
+            float filterLfoSemitones = 0.0f, pitchLfoSemitones = 0.0f;
+            float wtLfoOffset[2] {};
+            bool pitchLfoActive = false;
+            for (size_t lfoIndex = 0; lfoIndex < lfoSettings.size(); ++lfoIndex) {
+                const auto& lfo = lfoSettings[lfoIndex];
+                if (!lfo.enabled || lfo.destination == 0) continue;
+                const float value = lfoValue(lfo.waveform, lfoPhase[lfoIndex]) * lfo.depth;
+                switch (lfo.destination) {
+                    case 1: filterLfoSemitones += value * 24.0f; break;
+                    case 2: wtLfoOffset[0] += value; break;
+                    case 3: wtLfoOffset[1] += value; break;
+                    case 4: pitchLfoSemitones += value * 12.0f; pitchLfoActive = true; break;
+                }
+                lfoPhase[lfoIndex] += lfo.rateHz / (float) currentSampleRate;
+                if (lfoPhase[lfoIndex] >= 1.0f) lfoPhase[lfoIndex] -= std::floor(lfoPhase[lfoIndex]);
+            }
+            if (pitchLfoActive || lastPitchLfoSemitones != 0.0f) {
+                updateFrequencies(pitchLfoSemitones);
+                lastPitchLfoSemitones = pitchLfoSemitones;
+            }
+            if ((i & 7) == 0) {
+                const float cutoff = juce::jlimit(20.0f, (float)(0.45 * currentSampleRate),
+                    filterBaseCutoff * std::exp2((filterEnvAmountSemitones * filterEnv + modWheel * 24.0f
+                                                  + filterLfoSemitones) / 12.0f));
+                for (auto& filter : filters)
+                    filter.setCutoffFrequency(cutoff);
+            }
 
-            for (auto& u : units) {
+            for (size_t oscIndex = 0; oscIndex < units.size(); ++oscIndex) {
+                auto& u = units[oscIndex];
+                float oscLeft = 0.0f, oscRight = 0.0f;
+                const float ampEnv = ampEnvelopes[oscIndex].getNextSample();
                 u.levelCur += (u.s.level - u.levelCur) * smoothCoef;
                 u.panCur += (u.s.pan - u.panCur) * smoothCoef;
                 u.stereoCur += (u.s.stereo - u.stereoCur) * smoothCoef;
-                const float gain = u.levelCur * u.norm;
+                const float gain = u.levelCur * u.norm * ampEnv;
 
                 for (int k = 0; k < u.n; ++k) {
+                    const float wtPosition = juce::jlimit(0.0f, 1.0f,
+                        u.s.wtPos + wtLfoOffset[oscIndex]);
+                    u.voices[(size_t) k].setWavetablePosition(wtPosition);
                     const float x = u.voices[(size_t) k].processSample() * gain;
                     // позиция голоса: Pan осциллятора + разброс юнисона * Stereo
                     const float pos = juce::jlimit(-1.0f, 1.0f, u.panCur + u.spread[(size_t) k] * u.stereoCur);
-                    left += x * (pos > 0.0f ? 1.0f - pos : 1.0f);
-                    right += x * (pos < 0.0f ? 1.0f + pos : 1.0f);
+                    oscLeft += x * (pos > 0.0f ? 1.0f - pos : 1.0f);
+                    oscRight += x * (pos < 0.0f ? 1.0f + pos : 1.0f);
+                }
+                oscLeft *= 0.5f;
+                oscRight *= 0.5f;
+                if (filterEnabled && u.s.filterOn) {
+                    left += filters[oscIndex].processSample(0, oscLeft);
+                    right += filters[oscIndex].processSample(1, oscRight);
+                } else {
+                    left += oscLeft;
+                    right += oscRight;
                 }
             }
-            left *= 0.5f;
-            right *= 0.5f;
 
-            const float subSample = subLevel * sub.processSample();
-            left += subSample;
-            right += subSample;
+            const float subSample = subLevel * subAmpEnvelope.getNextSample() * sub.processSample();
+            if (filterEnabled && subFilterOn) {
+                left += filters[2].processSample(0, subSample);
+                right += filters[2].processSample(1, subSample);
+            } else {
+                left += subSample;
+                right += subSample;
+            }
 
-            const float env = adsr.getNextSample();
             const float gainOut = velocityGain * 0.2f;
-            const float outL = filter.processSample(0, left * env) * gainOut;
-            const float outR = filter.processSample(1, right * env) * gainOut;
+            const float outL = left * gainOut;
+            const float outR = right * gainOut;
 
             if (numCh == 1) {
                 outputBuffer.addSample(0, startSample + i, 0.5f * (outL + outR));
@@ -188,7 +291,8 @@ public:
                     outputBuffer.addSample(ch, startSample + i, 0.5f * (outL + outR));
             }
 
-            if (!adsr.isActive()) {
+            if (!ampEnvelopes[0].isActive() && !ampEnvelopes[1].isActive()
+                && !subAmpEnvelope.isActive()) {
                 clearCurrentNote();
                 break;
             }
@@ -196,6 +300,15 @@ public:
     }
 
 private:
+    static float lfoValue(int waveform, float phase) {
+        switch (waveform) {
+            case 1: return 1.0f - 4.0f * std::abs(phase - 0.5f); // triangle
+            case 2: return 2.0f * phase - 1.0f;                  // saw
+            case 3: return phase < 0.5f ? 1.0f : -1.0f;          // square
+            default: return std::sin(juce::MathConstants<float>::twoPi * phase);
+        }
+    }
+
     struct OscUnit {
         std::array<WavetableOscillator, kMaxUnison> voices;
         std::array<float, kMaxUnison> spread {};
@@ -206,26 +319,41 @@ private:
     };
 
     // Высота каждого голоса: нота + Octave + Interval + Fine + разброс Detune (в центах)
-    void updateFrequencies() {
-        for (auto& u : units) {
-            const float baseCents = (float) (u.s.octave * 1200 + u.s.semi * 100) + u.s.fineCents;
+    void updateFrequencies(float pitchLfoSemitones = 0.0f) {
+        for (size_t oscIndex = 0; oscIndex < units.size(); ++oscIndex) {
+            auto& u = units[oscIndex];
+            const float baseCents = (float) (u.s.octave * 1200 + u.s.semi * 100)
+                                  + u.s.fineCents + analogDriftCents[oscIndex];
             for (int k = 0; k < u.n; ++k) {
-                const float cents = baseCents + u.spread[(size_t) k] * u.s.detuneCents;
+                const float bend = ((float) pitchWheel - 8192.0f) / 8192.0f * pitchBendRange * 100.0f;
+                const float cents = baseCents + bend + pitchLfoSemitones * 100.0f
+                                  + u.spread[(size_t) k] * u.s.detuneCents;
                 u.voices[(size_t) k].setFrequency(baseFreq * std::exp2(cents / 1200.0f));
             }
         }
     }
 
     std::array<OscUnit, 2> units;
+    std::array<float, 2> analogDriftCents {};
+    std::array<LfoSettings, 2> lfoSettings;
+    std::array<float, 2> lfoPhase {};
+    float lastPitchLfoSemitones = 0.0f;
     WavetableOscillator sub;
     float subLevel = 0.0f;
-    juce::ADSR adsr;
-    juce::dsp::StateVariableTPTFilter<float> filter;
+    bool subFilterOn = true;
+    std::array<juce::ADSR, 2> ampEnvelopes;
+    juce::ADSR subAmpEnvelope;
+    juce::ADSR filterAdsr;
+    std::array<juce::dsp::StateVariableTPTFilter<float>, 3> filters;
+    float filterBaseCutoff = 1000.0f;
+    float filterEnvAmountSemitones = 0.0f;
     juce::Random random;
     double currentSampleRate = 44100.0;
     float smoothCoef = 0.01f;
     float baseFreq = 440.0f;
     float velocityGain = 1.0f;
+    float pitchBendRange = 2.0f, modWheel = 0.0f;
+    int pitchWheel = 8192;
 };
 
 WavetableSynthAudioProcessor::WavetableSynthAudioProcessor()
@@ -247,7 +375,9 @@ WavetableSynthAudioProcessor::WavetableSynthAudioProcessor()
         o.detune = parameters.getRawParameterValue(pre + "DETUNE");
         o.stereo = parameters.getRawParameterValue(pre + "STEREO");
     }
+    oscilloscopeBuffer.resize(512, 0.0f);
     heldNotes.reserve(128);
+    polyHeldNotes.reserve(128);
     arpSorted.reserve(128);
     arpSeq.reserve(1100);
     wavetable1 = wavetable2 = makeDefaultWavetable();
@@ -293,18 +423,58 @@ juce::AudioProcessorValueTreeState::ParameterLayout WavetableSynthAudioProcessor
         params.push_back(std::make_unique<juce::AudioParameterInt>(pre + "UNISON", nm + "Unison", 1, kMaxUnison, 1));
         params.push_back(std::make_unique<juce::AudioParameterFloat>(pre + "DETUNE", nm + "Detune", juce::NormalisableRange<float>(0.0f, 100.0f, 0.1f), 25.0f, FloatAttr().withStringFromValueFunction(cents)));
         params.push_back(std::make_unique<juce::AudioParameterFloat>(pre + "STEREO", nm + "Stereo", 0.0f, 1.0f, 0.7f));
+        params.push_back(std::make_unique<juce::AudioParameterBool>(pre + "FILTER", nm + "To Filter", true));
+        params.push_back(std::make_unique<juce::AudioParameterBool>(pre + "ANALOG", nm + "Analog Mode", false));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(pre + "ENV_ATTACK", nm + "Amp Attack", 0.001f, 5.0f, 0.01f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(pre + "ENV_DECAY", nm + "Amp Decay", 0.01f, 5.0f, 0.2f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(pre + "ENV_SUSTAIN", nm + "Amp Sustain", 0.0f, 1.0f, 0.8f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(pre + "ENV_RELEASE", nm + "Amp Release", 0.01f, 5.0f, 0.3f));
     }
     params.push_back(std::make_unique<juce::AudioParameterChoice>("SUB_WAVE", "Sub Wave", juce::StringArray{"Sine", "Square", "Noise"}, 2));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("SUB_LEVEL", "Sub Level", 0.0f, 1.0f, 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterBool>("SUB_FILTER", "Sub To Filter", true));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>("SUB_ENV_ATTACK", "Sub Amp Attack", 0.001f, 5.0f, 0.01f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>("SUB_ENV_DECAY", "Sub Amp Decay", 0.01f, 5.0f, 0.2f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>("SUB_ENV_SUSTAIN", "Sub Amp Sustain", 0.0f, 1.0f, 0.8f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>("SUB_ENV_RELEASE", "Sub Amp Release", 0.01f, 5.0f, 0.3f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("CUTOFF", "Filter Cutoff", juce::NormalisableRange<float>(20.0f, 20000.0f, 1.0f, 0.3f), 8000.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("RESONANCE", "Filter Resonance", 0.1f, 10.0f, 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterBool>("FILTER_ON", "Filter On", true));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>("FILTER_TYPE", "Filter Type", juce::StringArray { "Low-pass", "Band-pass", "High-pass" }, 0));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("ATTACK", "Attack", 0.001f, 5.0f, 0.05f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("DECAY", "Decay", 0.01f, 5.0f, 0.2f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("SUSTAIN", "Sustain", 0.0f, 1.0f, 0.7f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("RELEASE", "Release", 0.01f, 5.0f, 0.4f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>("FILTER_ENV_ATTACK", "Filter Env Attack", 0.001f, 5.0f, 0.01f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>("FILTER_ENV_DECAY", "Filter Env Decay", 0.01f, 5.0f, 0.2f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>("FILTER_ENV_SUSTAIN", "Filter Env Sustain", 0.0f, 1.0f, 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>("FILTER_ENV_RELEASE", "Filter Env Release", 0.01f, 5.0f, 0.2f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>("FILTER_ENV_AMOUNT", "Filter Env Amount",
+        juce::NormalisableRange<float>(-48.0f, 48.0f, 0.1f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>("MASTER_VOLUME", "Master Volume", 0.0f, 1.0f, 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>("MASTER_PAN", "Master Pan",
+        juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 0.0f));
+
+    for (int n = 1; n <= 2; ++n) {
+        const juce::String pre = "LFO" + juce::String(n) + "_";
+        const juce::String label = "LFO " + juce::String(n) + " ";
+        params.push_back(std::make_unique<juce::AudioParameterBool>(pre + "ON", label + "On", false));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(pre + "DEST", label + "Destination",
+            juce::StringArray { "Off", "Cutoff", "OSC 1 WT", "OSC 2 WT", "Pitch" }, 0));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(pre + "WAVE", label + "Waveform",
+            juce::StringArray { "Sine", "Triangle", "Saw", "Square" }, 0));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(pre + "RATE", label + "Rate",
+            juce::NormalisableRange<float>(0.05f, 20.0f, 0.01f, 0.5f), 2.0f));
+        params.push_back(std::make_unique<juce::AudioParameterBool>(pre + "SYNC", label + "Tempo Sync", false));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(pre + "DIV", label + "Sync Division",
+            juce::StringArray { "1/1", "1/2", "1/4", "1/8", "1/16" }, 2));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(pre + "DEPTH", label + "Depth", 0.0f, 1.0f, 0.2f));
+    }
 
     params.push_back(std::make_unique<juce::AudioParameterChoice>("VOICE_MODE", "Voice Mode", juce::StringArray{"Poly", "Mono", "Legato"}, 0));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>("VOICE_COUNT", "Polyphony", juce::StringArray{"1", "2", "3", "4", "5", "6", "7", "8"}, 7));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("GLIDE_TIME", "Glide Time", 0.0f, 1.0f, 0.05f));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>("PITCH_RANGE", "Pitch Bend Range", juce::StringArray { "±2 semitones", "±12 semitones", "±24 semitones" }, 0));
 
     params.push_back(std::make_unique<juce::AudioParameterChoice>("REV_MODE", "Reverb Mode", juce::StringArray{"Ambience", "Room", "Hall", "Plate"}, 1));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("REV_SIZE", "Reverb Size", 0.0f, 1.0f, 0.5f));
@@ -373,6 +543,116 @@ void WavetableSynthAudioProcessor::updateVoiceWavetables() {
     wavetablesDirty = false;
 }
 
+void WavetableSynthAudioProcessor::applyVoiceMode (juce::MidiBuffer& midi, int mode, int voiceCount) {
+    voiceModeMidi.clear();
+    const bool modeChanged = mode != previousVoiceMode;
+    const bool voiceCountChanged = voiceCount != previousVoiceCount;
+    if (modeChanged) {
+        for (int channel = 1; channel <= 16; ++channel)
+            voiceModeMidi.addEvent(juce::MidiMessage::allSoundOff(channel), 0);
+        monoHeldNotes.clear();
+        polyHeldNotes.clear();
+        activeMonoNote = -1;
+        previousVoiceMode = mode;
+    }
+    if (voiceCountChanged) {
+        previousVoiceCount = voiceCount;
+        while ((int) polyHeldNotes.size() > voiceCount) {
+            const auto oldest = polyHeldNotes.front();
+            voiceModeMidi.addEvent(juce::MidiMessage::noteOff(oldest.channel, oldest.note), 0);
+            polyHeldNotes.erase(polyHeldNotes.begin());
+        }
+    }
+
+    if (mode == 0) {
+        for (const auto metadata : midi) {
+            const auto message = metadata.getMessage();
+            const int sample = metadata.samplePosition;
+            if (message.isNoteOn()) {
+                const int note = message.getNoteNumber();
+                const int channel = message.getChannel();
+                const auto repeated = std::find_if(polyHeldNotes.begin(), polyHeldNotes.end(),
+                    [note, channel](const MonoHeldNote& held) { return held.note == note && held.channel == channel; });
+                if (repeated != polyHeldNotes.end()) {
+                    voiceModeMidi.addEvent(juce::MidiMessage::noteOff(channel, note), sample);
+                    polyHeldNotes.erase(repeated);
+                }
+                if ((int) polyHeldNotes.size() >= voiceCount) {
+                    const auto oldest = polyHeldNotes.front();
+                    voiceModeMidi.addEvent(juce::MidiMessage::noteOff(oldest.channel, oldest.note), sample);
+                    polyHeldNotes.erase(polyHeldNotes.begin());
+                }
+                polyHeldNotes.push_back({ note, channel, message.getFloatVelocity() });
+                voiceModeMidi.addEvent(message, sample);
+            } else if (message.isNoteOff()) {
+                const int note = message.getNoteNumber();
+                const int channel = message.getChannel();
+                const auto held = std::find_if(polyHeldNotes.begin(), polyHeldNotes.end(),
+                    [note, channel](const MonoHeldNote& item) { return item.note == note && item.channel == channel; });
+                if (held != polyHeldNotes.end()) {
+                    voiceModeMidi.addEvent(message, sample);
+                    polyHeldNotes.erase(held);
+                } else if (!voiceCountChanged) {
+                    voiceModeMidi.addEvent(message, sample);
+                }
+            } else {
+                voiceModeMidi.addEvent(message, sample);
+            }
+        }
+        midi.swapWith(voiceModeMidi);
+        monoHeldNotes.clear();
+        activeMonoNote = -1;
+        return;
+    }
+    polyHeldNotes.clear();
+
+    for (const auto metadata : midi) {
+        const auto message = metadata.getMessage();
+        const int sample = metadata.samplePosition;
+
+        if (message.isNoteOn()) {
+            const int note = message.getNoteNumber();
+            const int channel = message.getChannel();
+            monoHeldNotes.erase(std::remove_if(monoHeldNotes.begin(), monoHeldNotes.end(),
+                [note, channel](const MonoHeldNote& held) { return held.note == note && held.channel == channel; }), monoHeldNotes.end());
+
+            voiceModeMidi.addEvent(juce::MidiMessage::allSoundOff(activeMonoChannel), sample);
+            if (channel != activeMonoChannel)
+                voiceModeMidi.addEvent(juce::MidiMessage::allSoundOff(channel), sample);
+            monoHeldNotes.push_back({ note, channel, message.getFloatVelocity() });
+            activeMonoNote = note;
+            activeMonoChannel = channel;
+            voiceModeMidi.addEvent(message, sample);
+        } else if (message.isNoteOff()) {
+            const int note = message.getNoteNumber();
+            const int channel = message.getChannel();
+            const auto held = std::find_if(monoHeldNotes.begin(), monoHeldNotes.end(),
+                [note, channel](const MonoHeldNote& item) { return item.note == note && item.channel == channel; });
+            if (held == monoHeldNotes.end())
+                continue;
+
+            const bool releasedActive = note == activeMonoNote && channel == activeMonoChannel;
+            monoHeldNotes.erase(held);
+            if (!releasedActive) continue;
+
+            if (monoHeldNotes.empty()) {
+                voiceModeMidi.addEvent(message, sample);
+                activeMonoNote = -1;
+            } else {
+                const auto next = monoHeldNotes.back();
+                voiceModeMidi.addEvent(juce::MidiMessage::allSoundOff(activeMonoChannel), sample);
+                voiceModeMidi.addEvent(juce::MidiMessage::noteOn(next.channel, next.note, next.velocity), sample);
+                activeMonoNote = next.note;
+                activeMonoChannel = next.channel;
+            }
+        } else {
+            voiceModeMidi.addEvent(message, sample);
+        }
+    }
+
+    midi.swapWith(voiceModeMidi);
+}
+
 void WavetableSynthAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages) {
     juce::ScopedNoDenormals noDenormals;
     const int numSamples = buffer.getNumSamples();
@@ -381,13 +661,27 @@ void WavetableSynthAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
 
     auto get = [this] (const char* id) { return parameters.getRawParameterValue(id)->load(); };
 
+    keyboardState.processNextMidiBuffer(midiMessages, 0, numSamples, true);
     // --- арпеджиатор: превращает удерживаемые ноты в поток нот (MIDI меняется на месте) ---
     processArpeggiator(midiMessages, numSamples);
+    const int pitchWheelValue = uiPitchWheelValue.load();
+    if (pitchWheelValue != lastUiPitchWheelValue) {
+        midiMessages.addEvent(juce::MidiMessage::pitchWheel(1, pitchWheelValue), 0);
+        lastUiPitchWheelValue = pitchWheelValue;
+    }
+    const int modWheelValue = uiModWheelValue.load();
+    if (modWheelValue != lastUiModWheelValue) {
+        midiMessages.addEvent(juce::MidiMessage::controllerEvent(1, 1, modWheelValue), 0);
+        lastUiModWheelValue = modWheelValue;
+    }
+    applyVoiceMode(midiMessages, (int) std::lround(get("VOICE_MODE")),
+                   (int) std::lround(get("VOICE_COUNT")) + 1);
 
     // --- синтезатор ---
     updateVoiceWavetables();
 
     VoiceParams vp;
+    vp.bpm = (float) currentBpm();
     for (size_t n = 0; n < 2; ++n) {
         const auto& o = oscParams[n];
         auto& d = vp.osc[n];
@@ -402,15 +696,44 @@ void WavetableSynthAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
         d.unison = (int) std::lround(o.unison->load());
         d.detuneCents = o.detune->load();
         d.stereo = o.stereo->load();
+        const auto prefix = "OSC" + juce::String((int)n + 1) + "_";
+        d.filterOn = get((prefix + "FILTER").toRawUTF8()) > 0.5f;
+        d.analogMode = get((prefix + "ANALOG").toRawUTF8()) > 0.5f;
+        auto& env = vp.ampEnvelopes[n];
+        env.attack = get((prefix + "ENV_ATTACK").toRawUTF8());
+        env.decay = get((prefix + "ENV_DECAY").toRawUTF8());
+        env.sustain = get((prefix + "ENV_SUSTAIN").toRawUTF8());
+        env.release = get((prefix + "ENV_RELEASE").toRawUTF8());
     }
     vp.subWave = (int) get("SUB_WAVE");
     vp.subLevel = get("SUB_LEVEL");
+    vp.subFilterOn = get("SUB_FILTER") > 0.5f;
+    vp.subAmpEnvelope.attack = get("SUB_ENV_ATTACK");
+    vp.subAmpEnvelope.decay = get("SUB_ENV_DECAY");
+    vp.subAmpEnvelope.sustain = get("SUB_ENV_SUSTAIN");
+    vp.subAmpEnvelope.release = get("SUB_ENV_RELEASE");
     vp.cutoff = get("CUTOFF");
     vp.resonance = get("RESONANCE");
-    vp.adsr.attack = get("ATTACK");
-    vp.adsr.decay = get("DECAY");
-    vp.adsr.sustain = get("SUSTAIN");
-    vp.adsr.release = get("RELEASE");
+    vp.filterEnabled = get("FILTER_ON") > 0.5f;
+    vp.filterType = (int) std::lround(get("FILTER_TYPE"));
+    const int pitchRangeIndex = (int) std::lround(get("PITCH_RANGE"));
+    vp.pitchBendRange = pitchRangeIndex == 0 ? 2.0f : (pitchRangeIndex == 1 ? 12.0f : 24.0f);
+    vp.filterAdsr.attack = get("FILTER_ENV_ATTACK");
+    vp.filterAdsr.decay = get("FILTER_ENV_DECAY");
+    vp.filterAdsr.sustain = get("FILTER_ENV_SUSTAIN");
+    vp.filterAdsr.release = get("FILTER_ENV_RELEASE");
+    vp.filterEnvAmountSemitones = get("FILTER_ENV_AMOUNT");
+    for (int n = 0; n < 2; ++n) {
+        const juce::String pre = "LFO" + juce::String(n + 1) + "_";
+        auto& lfo = vp.lfos[(size_t) n];
+        lfo.enabled = get((pre + "ON").toRawUTF8()) > 0.5f;
+        lfo.destination = (int) std::lround(get((pre + "DEST").toRawUTF8()));
+        lfo.waveform = (int) std::lround(get((pre + "WAVE").toRawUTF8()));
+        lfo.rateHz = get((pre + "RATE").toRawUTF8());
+        lfo.tempoSync = get((pre + "SYNC").toRawUTF8()) > 0.5f;
+        lfo.syncDivision = (int) std::lround(get((pre + "DIV").toRawUTF8()));
+        lfo.depth = get((pre + "DEPTH").toRawUTF8());
+    }
     for (int i = 0; i < synth.getNumVoices(); ++i)
         if (auto* voice = dynamic_cast<SynthVoice*>(synth.getVoice(i)))
             voice->setParams(vp);
@@ -470,24 +793,41 @@ void WavetableSynthAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
     juce::dsp::ProcessContextReplacing<float> context(block);
     reverb.process(context);
 
+    // Master volume and stereo balance are applied after the effects chain.
+    const float masterVolume = get("MASTER_VOLUME");
+    const float masterPan = get("MASTER_PAN");
+    const float panLeft = 1.0f - juce::jmax(0.0f, masterPan);
+    const float panRight = 1.0f + juce::jmin(0.0f, masterPan);
+    float peakLeft = 0.0f, peakRight = 0.0f;
+    float* leftData = buffer.getWritePointer(0);
+    float* rightData = numChannels > 1 ? buffer.getWritePointer(1) : nullptr;
+    for (int i = 0; i < numSamples; ++i) {
+        if (numChannels == 1) {
+            float& sample = leftData[i];
+            sample *= masterVolume;
+            peakLeft = peakRight = juce::jmax(peakLeft, std::abs(sample));
+        } else {
+            float& left = leftData[i];
+            float& right = rightData[i];
+            left *= masterVolume * panLeft;
+            right *= masterVolume * panRight;
+            peakLeft = juce::jmax(peakLeft, std::abs(left));
+            peakRight = juce::jmax(peakRight, std::abs(right));
+            for (int ch = 2; ch < numChannels; ++ch)
+                buffer.getWritePointer(ch)[i] *= masterVolume;
+        }
+    }
+    const float meterDecay = std::exp(-(float) numSamples / (float) (currentSampleRate * 0.35));
+    outputPeaks[0].store(juce::jmax(peakLeft, outputPeaks[0].load() * meterDecay));
+    outputPeaks[1].store(juce::jmax(peakRight, outputPeaks[1].load() * meterDecay));
+
     // --- осциллограф: скользящее окно последних 512 сэмплов ---
-    const int scopeSize = oscilloscopeSize;
+    const int scopeSize = (int) oscilloscopeBuffer.size();
     if (numSamples > 0 && scopeSize > 0) {
         const int k = juce::jmin(numSamples, scopeSize);
-        for (int i = 0; i < scopeSize - k; ++i)
-            oscilloscopeBuffer[(size_t) i].store(oscilloscopeBuffer[(size_t) (i + k)].load(std::memory_order_relaxed), std::memory_order_relaxed);
-        const float* source = buffer.getReadPointer(0) + (numSamples - k);
-        for (int i = 0; i < k; ++i)
-            oscilloscopeBuffer[(size_t) (scopeSize - k + i)].store(source[i], std::memory_order_relaxed);
+        std::memmove(oscilloscopeBuffer.data(), oscilloscopeBuffer.data() + k, (size_t) (scopeSize - k) * sizeof(float));
+        std::memcpy(oscilloscopeBuffer.data() + (scopeSize - k), buffer.getReadPointer(0) + (numSamples - k), (size_t) k * sizeof(float));
     }
-}
-
-void WavetableSynthAudioProcessor::copyOscilloscopeBuffer(float* destination, int count) const {
-    if (destination == nullptr || count <= 0) return;
-    const int n = juce::jmin(count, oscilloscopeSize);
-    const int start = oscilloscopeSize - n;
-    for (int i = 0; i < n; ++i)
-        destination[i] = oscilloscopeBuffer[(size_t) (start + i)].load(std::memory_order_relaxed);
 }
 
 double WavetableSynthAudioProcessor::currentBpm() const {
@@ -727,7 +1067,7 @@ void WavetableSynthAudioProcessor::setStateInformation (const void* data, int si
 }
 
 juce::AudioProcessorEditor* WavetableSynthAudioProcessor::createEditor() {
-    return new AudioPluginAudioProcessorEditor (*this);
+    return new WavetableSynthAudioProcessorEditor (*this);
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() {

@@ -21,7 +21,7 @@ if(APPLE)
 endif()
 
 juce_add_plugin(WavetableSynth
-    COMPANY_NAME "UNCLAW"
+    COMPANY_NAME "UNCLAW Audio"
     PLUGIN_NAME "WavetableSynth"
     BUNDLE_ID com.unclaw.wavetablesynth
     IS_SYNTH TRUE
@@ -29,7 +29,7 @@ juce_add_plugin(WavetableSynth
     IS_MIDI_EFFECT FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS TRUE
     PLUGIN_MANUFACTURER_CODE Uncl
-    PLUGIN_CODE Uclw
+    PLUGIN_CODE Wsyn
     FORMATS ${PLUGIN_FORMATS}
     COPY_PLUGIN_AFTER_BUILD FALSE
 )
@@ -48,6 +48,8 @@ target_sources(WavetableSynth PRIVATE
 target_compile_definitions(WavetableSynth PUBLIC
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
+    JUCE_JACK=0
+    JUCE_PLUGINHOST_LADSPA=0
     JUCE_VST3_CAN_REPLACE_VST2=0
 )
 

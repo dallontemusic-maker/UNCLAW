@@ -1,84 +1,122 @@
 #pragma once
-
+#include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <juce_audio_utils/juce_audio_utils.h>
 #include "PluginProcessor.h"
 #include "OscilloscopeDisplay.h"
+#include "BrowserSettings.h"
+#include <array>
+#include <vector>
 
-// Custom LookAndFeel in Unclaw Yellow/Black Style
-class UnclawYellowStyle : public juce::LookAndFeel_V4
-{
+class WavetableSynthAudioProcessorEditor : public juce::AudioProcessorEditor,
+                                           public juce::Button::Listener,
+                                           public juce::FileBrowserListener,
+                                           private juce::Timer {
 public:
-    UnclawYellowStyle()
-    {
-        setColour(juce::ResizableWindow::backgroundColourId, juce::Colour(0xff111215));
-        setColour(juce::TextButton::buttonColourId, juce::Colour(0xff181a20));
-        setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffffcc00));
-        setColour(juce::TextButton::textColourOnId, juce::Colour(0xff111215));
-        setColour(juce::TextButton::textColourOffId, juce::Colour(0xff8a90a0));
-    }
+    WavetableSynthAudioProcessorEditor(WavetableSynthAudioProcessor&);
+    ~WavetableSynthAudioProcessorEditor() override;
 
-    void drawRotarySlider(juce::Graphics& g, int x, int y, int width, int height,
-                           float sliderPos, float rotaryStartAngle, float rotaryEndAngle,
-                           juce::Slider& slider) override
-    {
-        auto bounds = juce::Rectangle<float>(x, y, width, height).reduced(3.0f);
-        auto radius = juce::jmin(bounds.getWidth(), bounds.getHeight()) / 2.0f;
-        auto centreX = bounds.getCentreX();
-        auto centreY = bounds.getCentreY();
-        auto angle = rotaryStartAngle + sliderPos * (rotaryEndAngle - rotaryStartAngle);
-
-        // Knob Shadow & Body
-        g.setColour(juce::Colour(0xff090a0c));
-        g.fillEllipse(centreX - radius, centreY - radius, radius * 2.0f, radius * 2.0f);
-
-        auto innerRadius = radius - 3.0f;
-        juce::ColourGradient knobGrad(juce::Colour(0xff2c303a), centreX, centreY - innerRadius,
-                                    juce::Colour(0xff16181e), centreX, centreY + innerRadius, false);
-        g.setGradientFill(knobGrad);
-        g.fillEllipse(centreX - innerRadius, centreY - innerRadius, innerRadius * 2.0f, innerRadius * 2.0f);
-
-        // Bright Yellow Active Arc
-        juce::Path valueArc;
-        valueArc.addCentredArc(centreX, centreY, radius - 1.5f, radius - 1.5f, 0.0f, rotaryStartAngle, angle, true);
-        g.setColour(juce::Colour(0xffffcc00));
-        g.strokePath(valueArc, juce::PathStrokeType(2.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-
-        // Indicator Line
-        juce::Path pointer;
-        auto pointerLength = innerRadius * 0.6f;
-        pointer.addRectangle(-1.25f, -innerRadius + 2.0f, 2.5f, pointerLength);
-        pointer.applyTransform(juce::AffineTransform::rotation(angle).translated(centreX, centreY));
-        g.setColour(juce::Colours::white);
-        g.fillPath(pointer);
-    }
-};
-
-class AudioPluginAudioProcessorEditor : public juce::AudioProcessorEditor
-{
-public:
-    AudioPluginAudioProcessorEditor (WavetableSynthAudioProcessor&);
-    ~AudioPluginAudioProcessorEditor() override;
-
-    void paint (juce::Graphics&) override;
+    void paint(juce::Graphics&) override;
     void resized() override;
+    void buttonClicked(juce::Button* button) override;
+
+    // juce::FileBrowserListener — выбор файла в дереве браузера
+    void selectionChanged() override;
+    void fileClicked(const juce::File&, const juce::MouseEvent&) override {}
+    void fileDoubleClicked(const juce::File&) override {}
+    void browserRootChanged(const juce::File&) override {}
 
 private:
+    void timerCallback() override;
+    void refreshFolderBox(int selectIndex);
+    void showFolder(int index);
+    void loadFromBrowser(const juce::File& file);
+
+    using APVTS = juce::AudioProcessorValueTreeState;
+    using SliderAttachment = APVTS::SliderAttachment;
+    using ButtonAttachment = APVTS::ButtonAttachment;
+    using ComboAttachment = APVTS::ComboBoxAttachment;
+
+    enum class CaptionKind { Section, Knob, Side };
+    struct Caption { juce::Rectangle<int> bounds; juce::String text; CaptionKind kind; };
+    struct Panel { juce::Rectangle<int> bounds; juce::Colour colour; };
+    std::vector<Caption> captions;
+    std::vector<Panel> panels;
+
+    void placeKnob(juce::Slider& slider, const juce::String& name, juce::Rectangle<int> cell);
+    void placeCompactKnob(juce::Slider& slider, const juce::String& name, juce::Rectangle<int> cell);
+    void placeCombo(juce::ComboBox& box, const juce::String& name, juce::Rectangle<int> cell);
+    void placeHFader(juce::Slider& slider, const juce::String& name, juce::Rectangle<int> row);
+    void addSection(const juce::String& name, juce::Rectangle<int> bounds);
+
     WavetableSynthAudioProcessor& audioProcessor;
-    UnclawYellowStyle yellowStyle;
+    OscilloscopeDisplay oscilloscope;
+    juce::MidiKeyboardComponent keyboard;
 
-    OscilloscopeDisplay oscilloscopeDisplay;
+    juce::TextButton loadOsc1Button { "Load WAV..." };
+    juce::TextButton loadOsc2Button { "Load WAV..." };
 
-    // Browser Panel Toggle State
-    bool isBrowserOpen = true;
+    // Панель осциллятора: форма, позиция в таблице, громкость, высота, фаза, панорама, юнисон
+    struct OscUI {
+        juce::ComboBox wave;
+        juce::Slider wtPos, level, oct, semi, fine, phase, pan, unison, detune, stereo;
+        juce::Slider attack, decay, sustain, release;
+        juce::TextButton analogButton { "ANALOG MODE" };
+        juce::ToggleButton toFilter { "TO FILTER" };
+    };
+    std::array<OscUI, 2> oscUI;
 
-    // UI Elements
-    juce::TextButton toggleBrowserBtn { "< HIDE" };
-    juce::ListBox presetListBox;
+    juce::ComboBox subWaveBox;
+    juce::Slider subLevelSlider;
+    juce::Slider subAttackSlider, subDecaySlider, subSustainSlider, subReleaseSlider;
+    juce::ToggleButton subToFilterButton { "TO FILTER" };
+    juce::Slider cutoffSlider, resonanceSlider;
+    juce::ToggleButton filterOnButton { "FILTER ON" };
+    juce::ComboBox filterTypeBox;
+    juce::Slider attackSlider, decaySlider, sustainSlider, releaseSlider;   // горизонтальные фейдеры
+    juce::Slider filterEnvAttackSlider, filterEnvDecaySlider, filterEnvSustainSlider,
+                  filterEnvReleaseSlider, filterEnvAmountSlider;
+    juce::Slider masterVolumeSlider, masterPanSlider;
+    juce::Rectangle<int> outputMeterBounds;
+    struct LfoUI {
+        juce::ToggleButton enabled { "ON" }, tempoSync { "SYNC" };
+        juce::ComboBox destination, waveform, syncDivision;
+        juce::Slider rate, depth;
+    };
+    std::array<LfoUI, 2> lfoUI;
+    juce::ComboBox voiceModeBox, voiceCountBox;
+    juce::Slider glideSlider;
+    juce::Slider pitchWheelSlider, modWheelSlider;
+    juce::ComboBox pitchRangeBox;
+    juce::ComboBox revModeBox;
+    juce::Slider revSizeSlider, revDecaySlider, revToneSlider, revMixSlider;
+    juce::ToggleButton delSyncButton { "Sync" };
+    juce::ComboBox delNoteBox;
+    juce::Slider delToneSlider, delMixSlider;
+    juce::Slider satDriveSlider, satMixSlider;
+    juce::ToggleButton arpEnableButton { "Arp On" };
+    juce::ComboBox arpModeBox, arpRateBox;
+    juce::Slider arpOctSlider, arpGateSlider;
 
-    juce::Slider wtPositionSlider;
-    juce::Slider filterCutoffSlider;
-    juce::Slider filterResoSlider;
-    juce::Slider masterGainSlider;
+    std::vector<std::unique_ptr<SliderAttachment>> sliderAttachments;
+    std::vector<std::unique_ptr<ButtonAttachment>> buttonAttachments;
+    std::vector<std::unique_ptr<ComboAttachment>> comboAttachments;
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioPluginAudioProcessorEditor)
+    std::unique_ptr<juce::FileChooser> chooser;
+    std::unique_ptr<juce::FileChooser> folderChooser;
+
+    // Браузер вейвтейблов (слева). Порядок объявления важен: поток сканирования должен пережить список и дерево.
+    BrowserSettings browserSettings;
+    juce::StringArray browserFolders;
+    int targetOsc = 1;
+    juce::TimeSliceThread scanThread { "Waveform scanner" };
+    juce::WildcardFileFilter waveFilter { "*.wav;*.aif;*.aiff;*.flac", "*", "Waveforms" };
+    juce::DirectoryContentsList folderContents { &waveFilter, scanThread };
+    juce::FileTreeComponent folderTree { folderContents };
+    juce::TextButton targetOsc1Button { "Osc 1" }, targetOsc2Button { "Osc 2" };
+    juce::ComboBox folderBox;
+    juce::TextButton addFolderButton { "Add Folder..." }, removeFolderButton { "Remove" };
+    juce::Label hintLabel, status1Label, status2Label;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WavetableSynthAudioProcessorEditor)
 };

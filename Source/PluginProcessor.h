@@ -1,8 +1,8 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_dsp/juce_dsp.h>
 #include <atomic>
-#include <array>
 #include <memory>
 #include <vector>
 #include "WavetableOscillator.h"
@@ -37,18 +37,28 @@ public:
     void setStateInformation (const void* data, int sizeInBytes) override;
 
     juce::AudioProcessorValueTreeState parameters;
+    juce::MidiKeyboardState keyboardState;
+    void setUiPitchWheelValue(int value) { uiPitchWheelValue.store(value); }
+    void setUiModWheelValue(int value) { uiModWheelValue.store(value); }
+    float getOutputPeak(int channel) const { return outputPeaks[(size_t) juce::jlimit(0, 1, channel)].load(); }
     // Загрузка вейвтейбла из аудиофайла для осциллятора 1 или 2.
     // loadCustomWavetable читает файл в вызывающем потоке; loadWavetableAsync делает это в фоне (для браузера).
     bool loadCustomWavetable(const juce::File& file, int oscIndex);
     void loadWavetableAsync(const juce::File& file, int oscIndex);
     juce::String getWavetableStatus(int oscIndex) const;   // текст для интерфейса: что загружено / почему не вышло
     juce::File getWavetableFile(int oscIndex) const;
-    static constexpr int oscilloscopeSize = 512;
-    void copyOscilloscopeBuffer(float* destination, int count) const;
+    std::vector<float> oscilloscopeBuffer;
 
 private:
     juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
     void updateVoiceWavetables();
+    void applyVoiceMode (juce::MidiBuffer& midi, int mode, int voiceCount);
+
+    struct MonoHeldNote { int note = -1, channel = 1; float velocity = 1.0f; };
+    std::vector<MonoHeldNote> monoHeldNotes;
+    std::vector<MonoHeldNote> polyHeldNotes;
+    juce::MidiBuffer voiceModeMidi;
+    int activeMonoNote = -1, activeMonoChannel = 1, previousVoiceMode = 0, previousVoiceCount = 8;
 
     // --- арпеджиатор ---
     void processArpeggiator(juce::MidiBuffer& midi, int numSamples);
@@ -71,6 +81,9 @@ private:
                            *fine = nullptr, *phase = nullptr, *pan = nullptr, *unison = nullptr, *detune = nullptr, *stereo = nullptr;
     };
     std::array<OscParamPtrs, 2> oscParams;
+    std::atomic<int> uiPitchWheelValue { 8192 }, uiModWheelValue { 0 };
+    std::array<std::atomic<float>, 2> outputPeaks { 0.0f, 0.0f };
+    int lastUiPitchWheelValue = 8192, lastUiModWheelValue = 0;
 
     juce::Synthesiser synth;
     juce::dsp::Reverb reverb;
@@ -91,7 +104,6 @@ private:
     mutable juce::CriticalSection statusLock;
     std::array<juce::String, 2> statusText { juce::String("built-in wavetable"), juce::String("built-in wavetable") };
     std::array<juce::File, 2> loadedFile;
-    std::array<std::atomic<float>, oscilloscopeSize> oscilloscopeBuffer {};
 
     juce::ThreadPool loadPool { 1 };   // объявлен последним: при удалении процессора останавливается первым
 
