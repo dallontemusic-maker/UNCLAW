@@ -14,7 +14,7 @@ struct OscSettings {
     int wave = 0, octave = 0, semi = 0, unison = 1;
     float wtPos = 0.0f, level = 1.0f, pan = 0.0f, stereo = 0.7f;
     float detuneCents = 25.0f, fineCents = 0.0f, phaseDeg = 0.0f;
-    bool filterOn = true, analogMode = false;
+    bool enabled = true, filterOn = true, analogMode = false;
 };
 
 struct LfoSettings {
@@ -27,7 +27,7 @@ struct VoiceParams {
     std::array<OscSettings, 2> osc;
     int subWave = 2;
     float subLevel = 0.0f;
-    bool subFilterOn = true;
+    bool subEnabled = true, subFilterOn = true;
     float cutoff = 1000.0f, resonance = 1.0f;
     bool filterEnabled = true;
     int filterType = 0;
@@ -187,6 +187,7 @@ public:
 
         sub.setSource(toSubSource(p.subWave));
         subLevel = p.subLevel;
+        subEnabled = p.subEnabled;
         subFilterOn = p.subFilterOn;
         subAmpEnvelope.setParameters(p.subAmpEnvelope);
         for (size_t i = 0; i < lfoSettings.size(); ++i) {
@@ -246,7 +247,7 @@ public:
                 u.levelCur += (u.s.level - u.levelCur) * smoothCoef;
                 u.panCur += (u.s.pan - u.panCur) * smoothCoef;
                 u.stereoCur += (u.s.stereo - u.stereoCur) * smoothCoef;
-                const float gain = u.levelCur * u.norm * ampEnv;
+                const float gain = (u.s.enabled ? u.levelCur : 0.0f) * u.norm * ampEnv;
 
                 for (int k = 0; k < u.n; ++k) {
                     const float wtPosition = juce::jlimit(0.0f, 1.0f,
@@ -269,7 +270,7 @@ public:
                 }
             }
 
-            const float subSample = subLevel * subAmpEnvelope.getNextSample() * sub.processSample();
+            const float subSample = (subEnabled ? subLevel : 0.0f) * subAmpEnvelope.getNextSample() * sub.processSample();
             if (filterEnabled && subFilterOn) {
                 left += filters[2].processSample(0, subSample);
                 right += filters[2].processSample(1, subSample);
@@ -340,7 +341,7 @@ private:
     float lastPitchLfoSemitones = 0.0f;
     WavetableOscillator sub;
     float subLevel = 0.0f;
-    bool subFilterOn = true;
+    bool subEnabled = true, subFilterOn = true;
     std::array<juce::ADSR, 2> ampEnvelopes;
     juce::ADSR subAmpEnvelope;
     juce::ADSR filterAdsr;
@@ -424,6 +425,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout WavetableSynthAudioProcessor
         params.push_back(std::make_unique<juce::AudioParameterInt>(pre + "UNISON", nm + "Unison", 1, kMaxUnison, 1));
         params.push_back(std::make_unique<juce::AudioParameterFloat>(pre + "DETUNE", nm + "Detune", juce::NormalisableRange<float>(0.0f, 100.0f, 0.1f), 25.0f, FloatAttr().withStringFromValueFunction(cents)));
         params.push_back(std::make_unique<juce::AudioParameterFloat>(pre + "STEREO", nm + "Stereo", 0.0f, 1.0f, 0.7f));
+        params.push_back(std::make_unique<juce::AudioParameterBool>(pre + "ON", nm + "Enabled", true));
         params.push_back(std::make_unique<juce::AudioParameterBool>(pre + "FILTER", nm + "To Filter", true));
         params.push_back(std::make_unique<juce::AudioParameterBool>(pre + "ANALOG", nm + "Analog Mode", false));
         params.push_back(std::make_unique<juce::AudioParameterFloat>(pre + "ENV_ATTACK", nm + "Amp Attack", 0.001f, 5.0f, 0.01f));
@@ -433,6 +435,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout WavetableSynthAudioProcessor
     }
     params.push_back(std::make_unique<juce::AudioParameterChoice>("SUB_WAVE", "Sub Wave", juce::StringArray{"Sine", "Square", "Noise"}, 2));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("SUB_LEVEL", "Sub Level", 0.0f, 1.0f, 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterBool>("SUB_ON", "Sub Enabled", true));
     params.push_back(std::make_unique<juce::AudioParameterBool>("SUB_FILTER", "Sub To Filter", true));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("SUB_ENV_ATTACK", "Sub Amp Attack", 0.001f, 5.0f, 0.01f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("SUB_ENV_DECAY", "Sub Amp Decay", 0.01f, 5.0f, 0.2f));
@@ -702,6 +705,7 @@ void WavetableSynthAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
         d.detuneCents = o.detune->load();
         d.stereo = o.stereo->load();
         const auto prefix = "OSC" + juce::String((int)n + 1) + "_";
+        d.enabled = get((prefix + "ON").toRawUTF8()) > 0.5f;
         d.filterOn = get((prefix + "FILTER").toRawUTF8()) > 0.5f;
         d.analogMode = get((prefix + "ANALOG").toRawUTF8()) > 0.5f;
         auto& env = vp.ampEnvelopes[n];
@@ -712,6 +716,7 @@ void WavetableSynthAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
     }
     vp.subWave = (int) get("SUB_WAVE");
     vp.subLevel = get("SUB_LEVEL");
+    vp.subEnabled = get("SUB_ON") > 0.5f;
     vp.subFilterOn = get("SUB_FILTER") > 0.5f;
     vp.subAmpEnvelope.attack = get("SUB_ENV_ATTACK");
     vp.subAmpEnvelope.decay = get("SUB_ENV_DECAY");

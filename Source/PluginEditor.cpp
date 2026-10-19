@@ -16,6 +16,27 @@ WavetableSynthAudioProcessorEditor::WavetableSynthAudioProcessorEditor(Wavetable
     keyboard.setColour(juce::MidiKeyboardComponent::keyDownOverlayColourId, juce::Colour(0xffffc928).withAlpha(0.65f));
     addAndMakeVisible(keyboard);
 
+    optionsButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff242629));
+    optionsButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff684e2a));
+    optionsButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xffe6e4dd));
+    optionsButton.onClick = [this] {
+        juce::PopupMenu sizes;
+        sizes.addItem(1, "Compact  ·  80%", true, getWidth() < 850);
+        sizes.addItem(2, "Standard  ·  100%", true, getWidth() >= 850 && getWidth() < 1020);
+        sizes.addItem(3, "Large  ·  120%", true, getWidth() >= 1020);
+        juce::PopupMenu menu;
+        menu.addSubMenu("Synthesizer size", sizes);
+        juce::Component::SafePointer<WavetableSynthAudioProcessorEditor> safeThis(this);
+        menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&optionsButton), [safeThis](int result) {
+            if (safeThis == nullptr || result < 1 || result > 3)
+                return;
+            const float scales[] { 0.8f, 1.0f, 1.2f };
+            safeThis->setSize(juce::roundToInt(728.0f * scales[result - 1]),
+                              juce::roundToInt(750.0f * scales[result - 1]));
+        });
+    };
+    addAndMakeVisible(optionsButton);
+
     for (auto* b : { &loadOsc1Button, &loadOsc2Button }) {
         b->addListener(this);
         b->setColour(juce::TextButton::buttonColourId, juce::Colour(0xff242629));
@@ -92,6 +113,7 @@ WavetableSynthAudioProcessorEditor::WavetableSynthAudioProcessorEditor(Wavetable
         addKnob(ui.decay, pre + "ENV_DECAY");
         addKnob(ui.sustain, pre + "ENV_SUSTAIN");
         addKnob(ui.release, pre + "ENV_RELEASE");
+        addToggle(ui.enabled, pre + "ON");
         addToggle(ui.toFilter, pre + "FILTER");
         ui.analogButton.setClickingTogglesState(true);
         ui.analogButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff202326));
@@ -103,6 +125,7 @@ WavetableSynthAudioProcessorEditor::WavetableSynthAudioProcessorEditor(Wavetable
     }
     addCombo(subWaveBox, "SUB_WAVE");
     addKnob(subLevelSlider, "SUB_LEVEL");
+    addToggle(subEnabledButton, "SUB_ON");
     addKnob(subAttackSlider, "SUB_ENV_ATTACK");
     addKnob(subDecaySlider, "SUB_ENV_DECAY");
     addKnob(subSustainSlider, "SUB_ENV_SUSTAIN");
@@ -226,6 +249,7 @@ WavetableSynthAudioProcessorEditor::WavetableSynthAudioProcessorEditor(Wavetable
     folderTree.setColour(juce::DirectoryContentsDisplayComponent::highlightedTextColourId, juce::Colour(0xffffdf68));
     folderTree.setItemHeight(22);
     folderTree.addListener(this);
+    folderTree.addMouseListener(this, true);
     addAndMakeVisible(folderTree);
 
     for (auto* l : { &hintLabel, &status1Label, &status2Label }) {
@@ -243,7 +267,9 @@ WavetableSynthAudioProcessorEditor::WavetableSynthAudioProcessorEditor(Wavetable
     startTimerHz(20);
     timerCallback();
 
-    setSize(1450, 930);
+    setSize(728, 750);
+    setResizable(true, false);
+    setResizeLimits(582, 600, 1092, 1125);
     showPage(0);
 }
 
@@ -252,6 +278,7 @@ WavetableSynthAudioProcessorEditor::~WavetableSynthAudioProcessorEditor() {
     audioProcessor.setUiPitchWheelValue(8192);
     audioProcessor.setUiModWheelValue(0);
     folderTree.removeListener(this);
+    folderTree.removeMouseListener(this);
     loadOsc1Button.removeListener(this);
     loadOsc2Button.removeListener(this);
     addFolderButton.removeListener(this);
@@ -276,11 +303,11 @@ void WavetableSynthAudioProcessorEditor::showPage(int page) {
     for (auto& osc : oscUI) {
         setComponentsVisible(showSynth, osc.wave, osc.wtPos, osc.level, osc.oct, osc.semi, osc.fine,
                              osc.phase, osc.pan, osc.unison, osc.detune, osc.stereo, osc.attack,
-                             osc.decay, osc.sustain, osc.release, osc.analogButton, osc.toFilter);
+                             osc.decay, osc.sustain, osc.release, osc.analogButton, osc.enabled, osc.toFilter);
     }
     setComponentsVisible(showSynth, loadOsc1Button, loadOsc2Button, oscilloscope, keyboard, subWaveBox,
                          subLevelSlider, subAttackSlider, subDecaySlider, subSustainSlider,
-                         subReleaseSlider, subToFilterButton, cutoffSlider, resonanceSlider,
+                         subReleaseSlider, subEnabledButton, subToFilterButton, cutoffSlider, resonanceSlider,
                          filterOnButton, filterTypeBox, filterEnvAttackSlider, filterEnvDecaySlider,
                          filterEnvSustainSlider, filterEnvReleaseSlider, filterEnvAmountSlider,
                          masterVolumeSlider, masterPanSlider, pitchWheelSlider, modWheelSlider,
@@ -325,6 +352,67 @@ void WavetableSynthAudioProcessorEditor::selectionChanged() {
     if (file.existsAsFile()) loadFromBrowser(file);
 }
 
+bool WavetableSynthAudioProcessorEditor::isInterestedInDragSource(const SourceDetails& details) {
+    if (currentPage != 0 || details.sourceComponent.get() != &folderTree)
+        return false;
+    const juce::File file(details.description.toString());
+    const auto ext = file.getFileExtension().toLowerCase();
+    return file.existsAsFile() && (ext == ".wav" || ext == ".aif" || ext == ".aiff" || ext == ".flac");
+}
+
+void WavetableSynthAudioProcessorEditor::itemDragEnter(const SourceDetails& details) {
+    itemDragMove(details);
+}
+
+void WavetableSynthAudioProcessorEditor::itemDragMove(const SourceDetails& details) {
+    const auto point = details.localPosition;
+    int target = 0;
+    for (int i = 0; i < (int) oscillatorDropBounds.size(); ++i)
+        if (oscillatorDropBounds[(size_t) i].contains(point)) target = i + 1;
+    if (target != dragHoverOscillator) {
+        dragHoverOscillator = target;
+        repaint();
+    }
+}
+
+void WavetableSynthAudioProcessorEditor::itemDragExit(const SourceDetails&) {
+    if (dragHoverOscillator != 0) {
+        dragHoverOscillator = 0;
+        repaint();
+    }
+}
+
+void WavetableSynthAudioProcessorEditor::itemDropped(const SourceDetails& details) {
+    const auto point = details.localPosition;
+    for (int i = 0; i < (int) oscillatorDropBounds.size(); ++i) {
+        if (oscillatorDropBounds[(size_t) i].contains(point)) {
+            loadExternalWavetable(juce::File(details.description.toString()), i + 1);
+            break;
+        }
+    }
+    dragHoverOscillator = 0;
+    repaint();
+}
+
+void WavetableSynthAudioProcessorEditor::mouseDown(const juce::MouseEvent&) {
+    dragStartedFromBrowser = false;
+}
+
+void WavetableSynthAudioProcessorEditor::mouseDrag(const juce::MouseEvent& event) {
+    if (dragStartedFromBrowser || event.getDistanceFromDragStart() < 5)
+        return;
+    const auto file = folderTree.getSelectedFile();
+    const auto ext = file.getFileExtension().toLowerCase();
+    if (!file.existsAsFile() || (ext != ".wav" && ext != ".aif" && ext != ".aiff" && ext != ".flac"))
+        return;
+    dragStartedFromBrowser = true;
+    startDragging(file.getFullPathName(), &folderTree, juce::ScaledImage(), false, nullptr, &event.source);
+}
+
+void WavetableSynthAudioProcessorEditor::mouseUp(const juce::MouseEvent&) {
+    dragStartedFromBrowser = false;
+}
+
 void WavetableSynthAudioProcessorEditor::loadFromBrowser(const juce::File& file) {
     loadExternalWavetable(file, targetOsc);
 }
@@ -348,6 +436,9 @@ void WavetableSynthAudioProcessorEditor::loadExternalWavetable(const juce::File&
 void WavetableSynthAudioProcessorEditor::timerCallback() {
     status1Label.setText("Osc 1: " + audioProcessor.getWavetableStatus(1), juce::dontSendNotification);
     status2Label.setText("Osc 2: " + audioProcessor.getWavetableStatus(2), juce::dontSendNotification);
+    for (auto& osc : oscUI)
+        osc.enabled.setButtonText(osc.enabled.getToggleState() ? "ON" : "OFF");
+    subEnabledButton.setButtonText(subEnabledButton.getToggleState() ? "ON" : "OFF");
     revOnButton.setButtonText(revOnButton.getToggleState() ? "ON" : "OFF");
     delOnButton.setButtonText(delOnButton.getToggleState() ? "ON" : "OFF");
     satOnButton.setButtonText(satOnButton.getToggleState() ? "ON" : "OFF");
@@ -360,8 +451,12 @@ void WavetableSynthAudioProcessorEditor::placeKnob(juce::Slider& slider, const j
 }
 
 void WavetableSynthAudioProcessorEditor::placeCompactKnob(juce::Slider& slider, const juce::String& name, juce::Rectangle<int> cell) {
-    captions.push_back({ cell.removeFromTop(13), name, CaptionKind::Knob });
-    slider.setBounds(cell.withSizeKeepingCentre(56, 56));
+    const int textHeight = juce::jlimit(8, 13, cell.getHeight() / 5);
+    captions.push_back({ cell.removeFromTop(textHeight), name, CaptionKind::Knob });
+    const int boxWidth = juce::jlimit(28, 56, cell.getWidth() - 2);
+    const int boxHeight = juce::jlimit(9, 14, cell.getHeight() / 5);
+    slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, boxWidth, boxHeight);
+    slider.setBounds(cell.reduced(1, 0));
 }
 
 void WavetableSynthAudioProcessorEditor::placeCombo(juce::ComboBox& box, const juce::String& name, juce::Rectangle<int> cell) {
@@ -396,6 +491,13 @@ void WavetableSynthAudioProcessorEditor::paint(juce::Graphics& g) {
         g.setColour(juce::Colour(0xffffc928).withAlpha(0.8f));
         g.fillRoundedRectangle((float) panel.bounds.getX() + 1.0f, (float) panel.bounds.getY() + 9.0f, 2.0f,
                                juce::jmax(20.0f, (float) panel.bounds.getHeight() - 18.0f), 1.0f);
+    }
+    if (dragHoverOscillator > 0 && dragHoverOscillator <= (int) oscillatorDropBounds.size()) {
+        const auto target = oscillatorDropBounds[(size_t) dragHoverOscillator - 1].toFloat();
+        g.setColour(juce::Colour(0xffffd02a).withAlpha(0.10f));
+        g.fillRoundedRectangle(target, 5.0f);
+        g.setColour(juce::Colour(0xffffd02a));
+        g.drawRoundedRectangle(target.reduced(2.0f), 5.0f, 2.0f);
     }
     if (!filterEnvelopeGraphBounds.isEmpty()) {
         const auto graph = filterEnvelopeGraphBounds.toFloat();
@@ -463,27 +565,30 @@ void WavetableSynthAudioProcessorEditor::paint(juce::Graphics& g) {
         g.drawText("OUT", outputMeterBounds.getX(), outputMeterBounds.getY() - 13,
                    outputMeterBounds.getWidth(), 12, juce::Justification::centred);
     }
-    // Compact hardware-style header and warm yellow brand accent.
+    // Header and browser rail follow the supplied compact reference layout.
+    const float sx = (float) getWidth() / 728.0f;
+    const float sy = (float) getHeight() / 750.0f;
+    const auto X = [sx](float value) { return value * sx; };
+    const auto Y = [sy](float value) { return value * sy; };
     g.setColour(juce::Colour(0xff151719));
-    g.fillRoundedRectangle(18.0f, 10.0f, (float) getWidth() - 36.0f, 48.0f, 5.0f);
+    g.fillRoundedRectangle(X(6), Y(5), (float) getWidth() - X(12), Y(43), 5.0f);
     g.setColour(juce::Colour(0xff45494c));
-    g.drawRoundedRectangle(18.0f, 10.0f, (float) getWidth() - 36.0f, 48.0f, 5.0f, 1.0f);
+    g.drawRoundedRectangle(X(6), Y(5), (float) getWidth() - X(12), Y(43), 5.0f, 1.0f);
     juce::Path mark;
-    mark.startNewSubPath(34.0f, 43.0f); mark.lineTo(45.0f, 20.0f); mark.lineTo(55.0f, 43.0f);
-    mark.lineTo(48.0f, 39.0f); mark.lineTo(40.0f, 43.0f);
+    mark.startNewSubPath(X(77), Y(32)); mark.lineTo(X(87), Y(11)); mark.lineTo(X(97), Y(32));
+    mark.lineTo(X(91), Y(29)); mark.lineTo(X(83), Y(32));
     g.setColour(juce::Colour(0xffffc928));
-    g.strokePath(mark, juce::PathStrokeType(2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    g.strokePath(mark, juce::PathStrokeType(1.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
     g.setColour(juce::Colour(0xffe7e3d8));
-    g.setFont(juce::FontOptions(16.0f, juce::Font::bold));
-    g.drawText("UNCLAW", 66, 17, 132, 22, juce::Justification::centredLeft);
+    g.setFont(juce::FontOptions(14.0f, juce::Font::bold));
+    g.drawText("UNCLAW", (int) X(103), (int) Y(10), (int) X(80), (int) Y(18), juce::Justification::centredLeft);
     g.setColour(juce::Colour(0xffffc928));
-    g.setFont(juce::FontOptions(8.5f, juce::Font::bold));
-    g.drawText("WAVETABLE SYNTHESIZER", 67, 37, 170, 12, juce::Justification::centredLeft);
-    g.setColour(juce::Colour(0xffb1aea5));
-    g.setFont(juce::FontOptions(9.5f));
-    g.drawText("ANALOG ENGINE  ·  2 OSC  ·  SUB", getWidth() - 310, 25, 265, 15, juce::Justification::centredRight);
+    g.setFont(juce::FontOptions(7.0f, juce::Font::bold));
+    g.drawText("WAVETABLE SYNTHESIZER", (int) X(104), (int) Y(27), (int) X(120), (int) Y(10), juce::Justification::centredLeft);
     g.setColour(juce::Colour(0xff383b3e));
-    g.drawVerticalLine(browserVisible ? 250.0f : 48.0f, 58.0f, (float) getHeight());
+    const float rail = browserVisible ? X(158) : X(46);
+    g.fillRoundedRectangle(X(6), Y(53), rail - X(9), (float) getHeight() - Y(59), 3.0f);
+    g.drawVerticalLine(rail, Y(52), (float) getHeight() - Y(8));
 
     for (const auto& c : captions) {
         switch (c.kind) {
@@ -513,277 +618,291 @@ void WavetableSynthAudioProcessorEditor::resized() {
     panels.clear();
     filterEnvelopeGraphBounds = juce::Rectangle<int>();
     wavePreviewBounds.fill(juce::Rectangle<int>());
+    oscillatorDropBounds.fill(juce::Rectangle<int>());
+
+    const float sx = (float) getWidth() / 728.0f;
+    const float sy = (float) getHeight() / 750.0f;
+    const auto X = [sx](int value) { return juce::roundToInt((float) value * sx); };
+    const auto Y = [sy](int value) { return juce::roundToInt((float) value * sy); };
+    optionsButton.setBounds(X(7), Y(6), X(58), Y(16));
     auto bounds = getLocalBounds();
+    const int browserWidth = browserVisible ? X(150) : X(38);
+    auto browserColumn = bounds.removeFromLeft(browserWidth);
 
-    // ---------------- браузер (слева) ----------------
-    const int browserWidth = browserVisible ? 250 : 48;
-    auto browser = bounds.removeFromLeft(browserWidth);
     if (browserVisible) {
-        browser = browser.reduced(12, 68);
-        auto browserTitle = browser.removeFromTop(20);
-        addSection("WAVEFORM BROWSER", browserTitle);
-        browser.removeFromTop(8);
-
-        auto targetRow = browser.removeFromTop(26);
-        captions.push_back({ targetRow.removeFromLeft(72), "Load into:", CaptionKind::Side });
-        targetOsc1Button.setBounds(targetRow.removeFromLeft(targetRow.getWidth() / 2).reduced(2, 0));
-        targetOsc2Button.setBounds(targetRow.reduced(2, 0));
-        browser.removeFromTop(8);
-
-        folderBox.setBounds(browser.removeFromTop(26));
-        browser.removeFromTop(6);
-        auto folderButtons = browser.removeFromTop(26);
-        addFolderButton.setBounds(folderButtons.removeFromLeft(folderButtons.getWidth() * 3 / 5).reduced(2, 0));
-        removeFolderButton.setBounds(folderButtons.reduced(2, 0));
-        browser.removeFromTop(8);
-
-        auto statusArea = browser.removeFromBottom(64);
-        statusArea.removeFromTop(6);
-        status1Label.setBounds(statusArea.removeFromTop(28));
-        status2Label.setBounds(statusArea.removeFromTop(28));
-        folderTree.setBounds(browser);
-        hintLabel.setBounds(browser.reduced(6));
+        auto browser = browserColumn.reduced(X(8), Y(53));
+        auto browserTitle = browser.removeFromTop(Y(17));
+        captions.push_back({ browserTitle.withWidth(juce::jmax(0, browserTitle.getWidth() - X(36))),
+                             "WAVEFORM BROWSER", CaptionKind::Section });
         browserToggleButton.setButtonText("HIDE");
-        browserToggleButton.setBounds(browserWidth - 54, 68, 42, 18);
+        browserToggleButton.setBounds(browserWidth - X(39), Y(53), X(31), Y(16));
+        browser.removeFromTop(Y(5));
+
+        auto targetRow = browser.removeFromTop(Y(21));
+        captions.push_back({ targetRow.removeFromLeft(X(44)), "Load into:", CaptionKind::Side });
+        const int targetButtonWidth = targetRow.getWidth() / 2;
+        targetOsc1Button.setBounds(targetRow.removeFromLeft(targetButtonWidth).reduced(X(1), 0));
+        targetOsc2Button.setBounds(targetRow.reduced(X(1), 0));
+        browser.removeFromTop(Y(5));
+        folderBox.setBounds(browser.removeFromTop(Y(20)));
+        browser.removeFromTop(Y(4));
+        auto folderButtons = browser.removeFromTop(Y(20));
+        addFolderButton.setBounds(folderButtons.removeFromLeft(folderButtons.getWidth() * 3 / 5).reduced(X(1), 0));
+        removeFolderButton.setBounds(folderButtons.reduced(X(1), 0));
+        browser.removeFromTop(Y(5));
+
+        auto statusArea = browser.removeFromBottom(Y(37));
+        status1Label.setBounds(statusArea.removeFromTop(Y(17)));
+        status2Label.setBounds(statusArea.removeFromTop(Y(17)));
+        folderTree.setBounds(browser);
+        hintLabel.setBounds(browser.reduced(X(3)));
     } else {
         browserToggleButton.setButtonText("SHOW");
-        browserToggleButton.setBounds(3, 68, browserWidth - 6, 22);
+        browserToggleButton.setBounds(X(3), Y(53), browserWidth - X(6), Y(18));
     }
+
     juce::Component* browserComponents[] { &targetOsc1Button, &targetOsc2Button, &folderBox,
         &addFolderButton, &removeFolderButton, &folderTree, &hintLabel, &status1Label, &status2Label };
     for (auto* component : browserComponents)
         component->setVisible(browserVisible);
 
-    const int tabsX = browserWidth + 17;
-    synthTabButton.setBounds(tabsX, 16, 72, 28);
-    effectsTabButton.setBounds(tabsX + 76, 16, 82, 28);
-    arpTabButton.setBounds(tabsX + 162, 16, 116, 28);
+    const int tabsX = browserWidth + X(15);
+    synthTabButton.setBounds(tabsX, Y(54), X(49), Y(23));
+    effectsTabButton.setBounds(tabsX + X(51), Y(54), X(62), Y(23));
+    arpTabButton.setBounds(tabsX + X(115), Y(54), X(84), Y(23));
 
-    auto area = bounds.reduced(20);
-    area.removeFromTop(42);                                   // аппаратная шапка и вкладки
+    auto area = bounds.reduced(X(15), Y(6));
+    area.removeFromTop(Y(78)); // header, browser title and page tabs
 
     if (currentPage == 1) {
-        auto title = area.removeFromTop(24);
-        auto fxRow = area.removeFromTop(132);
-        const int fxGap = 14;
-        auto reverb = fxRow.removeFromLeft(405); fxRow.removeFromLeft(fxGap);
-        auto delay = fxRow.removeFromLeft(335); fxRow.removeFromLeft(fxGap);
-        auto saturation = fxRow;
-        auto titleFor = [&](juce::Rectangle<int> g) { return juce::Rectangle<int>(g.getX(), title.getY(), g.getWidth() - 52, title.getHeight()); };
-        addSection("REVERB", titleFor(reverb));
-        addSection("DELAY", titleFor(delay));
-        addSection("SATURATION", titleFor(saturation));
-        revOnButton.setBounds(reverb.getRight() - 48, title.getY() - 1, 48, 20);
-        delOnButton.setBounds(delay.getRight() - 48, title.getY() - 1, 48, 20);
-        satOnButton.setBounds(saturation.getRight() - 48, title.getY() - 1, 48, 20);
-        panels.push_back({ reverb.withY(fxRow.getY()).withHeight(132), juce::Colour(0xff292c2f) });
-        panels.push_back({ delay.withY(fxRow.getY()).withHeight(132), juce::Colour(0xff292c2f) });
-        panels.push_back({ saturation.withY(fxRow.getY()).withHeight(132), juce::Colour(0xff292c2f) });
+        addSection("EFFECTS", area.removeFromTop(Y(18)));
+        auto cards = area.removeFromTop(Y(162));
+        const int gap = X(6);
+        const int cardWidth = (cards.getWidth() - 2 * gap) / 3;
+        auto makeEffectCard = [&](const juce::String& title, juce::Rectangle<int> card, juce::ToggleButton& on) {
+            panels.push_back({ card, juce::Colour(0xff292c2f) });
+            auto header = card.removeFromTop(Y(17));
+            addSection(title, header.withWidth(juce::jmax(0, header.getWidth() - X(35))));
+            on.setBounds(header.removeFromRight(X(34)).reduced(X(1), Y(1)));
+            return card.reduced(X(4), Y(3));
+        };
+        auto reverb = makeEffectCard("REVERB", cards.removeFromLeft(cardWidth), revOnButton);
+        cards.removeFromLeft(gap);
+        auto delay = makeEffectCard("DELAY", cards.removeFromLeft(cardWidth), delOnButton);
+        cards.removeFromLeft(gap);
+        auto saturation = makeEffectCard("SATURATION", cards, satOnButton);
 
-        placeCombo(revModeBox, "Mode", reverb.removeFromLeft(94).reduced(3, 4));
-        reverb.removeFromLeft(4);
-        placeKnob(revSizeSlider, "Size", reverb.removeFromLeft(70));
-        placeKnob(revDecaySlider, "Decay", reverb.removeFromLeft(70));
-        placeKnob(revToneSlider, "Tone", reverb.removeFromLeft(70));
-        placeKnob(revMixSlider, "Mix", reverb.removeFromLeft(70));
+        placeCombo(revModeBox, "Mode", reverb.removeFromTop(Y(37)));
+        auto revKnobs = reverb.removeFromTop(Y(75));
+        const int revCell = revKnobs.getWidth() / 4;
+        placeCompactKnob(revSizeSlider, "Size", revKnobs.removeFromLeft(revCell));
+        placeCompactKnob(revDecaySlider, "Decay", revKnobs.removeFromLeft(revCell));
+        placeCompactKnob(revToneSlider, "Tone", revKnobs.removeFromLeft(revCell));
+        placeCompactKnob(revMixSlider, "Mix", revKnobs);
 
-        auto delaySync = delay.removeFromLeft(126).reduced(4, 6);
-        delSyncButton.setBounds(delaySync.removeFromTop(26));
-        delaySync.removeFromTop(8);
-        delNoteBox.setBounds(delaySync.removeFromTop(26));
-        delay.removeFromLeft(4);
-        placeKnob(delToneSlider, "Tone", delay.removeFromLeft(82));
-        placeKnob(delMixSlider, "Mix", delay.removeFromLeft(82));
-        placeKnob(satDriveSlider, "Drive", saturation.removeFromLeft(82));
-        placeKnob(satMixSlider, "Mix", saturation.removeFromLeft(82));
+        auto delayControls = delay.removeFromTop(Y(31));
+        delSyncButton.setBounds(delayControls.removeFromLeft(delayControls.getWidth() / 2).reduced(X(2), Y(2)));
+        placeCombo(delNoteBox, "Rate", delayControls);
+        auto delKnobs = delay.removeFromTop(Y(75));
+        placeCompactKnob(delToneSlider, "Tone", delKnobs.removeFromLeft(delKnobs.getWidth() / 2));
+        placeCompactKnob(delMixSlider, "Mix", delKnobs);
+
+        auto satKnobs = saturation.removeFromTop(Y(90));
+        placeCompactKnob(satDriveSlider, "Drive", satKnobs.removeFromLeft(satKnobs.getWidth() / 2));
+        placeCompactKnob(satMixSlider, "Mix", satKnobs);
         return;
     }
 
     if (currentPage == 2) {
-        auto title = area.removeFromTop(24);
-        auto arpPanel = area.removeFromTop(156);
-        addSection("ARPEGGIATOR", title);
+        addSection("ARPEGGIATOR", area.removeFromTop(Y(18)));
+        auto arpPanel = area.removeFromTop(Y(130));
         panels.push_back({ arpPanel, juce::Colour(0xff292c2f) });
-        arpPanel.reduce(14, 12);
-        auto onCell = arpPanel.removeFromLeft(100);
-        captions.push_back({ onCell.removeFromTop(14), "ENABLE", CaptionKind::Knob });
-        arpEnableButton.setBounds(onCell.removeFromTop(28));
-        arpPanel.removeFromLeft(18);
-        placeCombo(arpModeBox, "Mode", arpPanel.removeFromLeft(145));
-        arpPanel.removeFromLeft(16);
-        placeCombo(arpRateBox, "Rate", arpPanel.removeFromLeft(130));
-        arpPanel.removeFromLeft(16);
-        placeKnob(arpOctSlider, "Octaves", arpPanel.removeFromLeft(90));
-        arpPanel.removeFromLeft(10);
-        placeKnob(arpGateSlider, "Gate", arpPanel.removeFromLeft(90));
+        auto controls = arpPanel.reduced(X(8), Y(8));
+        arpEnableButton.setBounds(controls.removeFromLeft(X(82)).withHeight(Y(22)));
+        controls.removeFromLeft(X(8));
+        placeCombo(arpModeBox, "Mode", controls.removeFromLeft(X(122)));
+        controls.removeFromLeft(X(6));
+        placeCombo(arpRateBox, "Rate", controls.removeFromLeft(X(94)));
+        controls.removeFromLeft(X(6));
+        placeCompactKnob(arpOctSlider, "Octaves", controls.removeFromLeft(X(54)));
+        placeCompactKnob(arpGateSlider, "Gate", controls.removeFromLeft(X(54)));
         return;
     }
 
-    constexpr int kCompactRow = 70;
-
-    // Three sound sources share one aligned top row: OSC 1, OSC 2 and SUB.
-    auto sourceRow = area.removeFromTop(300);
-    const int sourceGap = 10;
+    // Synth page: three aligned sources, a centered square scope, two LFOs and a complete keyboard row.
+    auto sourceRow = area.removeFromTop(Y(210));
+    const int sourceGap = X(5);
     const int sourceWidth = (sourceRow.getWidth() - sourceGap * 2) / 3;
     for (int n = 0; n < 2; ++n) {
         if (n > 0) sourceRow.removeFromLeft(sourceGap);
         auto card = sourceRow.removeFromLeft(sourceWidth);
         const int panelX = card.getX(), panelY = card.getY();
         auto& ui = oscUI[(size_t) n];
-        auto oscHeader = card.removeFromTop(20);
-        ui.analogButton.setBounds(oscHeader.removeFromRight(102).reduced(2, 1));
-        addSection("OSCILLATOR " + juce::String(n + 1), oscHeader);
-        auto sourceControls = card.removeFromTop(40);
-        placeCombo(ui.wave, "Wave", sourceControls.removeFromLeft(142));
-        sourceControls.removeFromLeft(8);
-        auto& loadBtn = (n == 0) ? loadOsc1Button : loadOsc2Button;
-        loadBtn.setBounds(sourceControls.removeFromLeft(118).withHeight(26).withY(sourceControls.getY() + 4));
-        wavePreviewBounds[(size_t) n] = sourceControls.reduced(2, 3);
+        auto header = card.removeFromTop(Y(16));
+        ui.analogButton.setBounds(header.removeFromRight(X(56)).reduced(X(1), Y(1)));
+        ui.enabled.setBounds(header.removeFromRight(X(27)).reduced(X(1), Y(1)));
+        addSection("OSCILLATOR " + juce::String(n + 1), header);
 
-        auto rowA = card.removeFromTop(kCompactRow);
-        const int knobWidth = rowA.getWidth() / 5;
-        placeCompactKnob(ui.wtPos, "WT Pos", rowA.removeFromLeft(knobWidth));
-        placeCompactKnob(ui.level, "Level", rowA.removeFromLeft(knobWidth));
-        placeCompactKnob(ui.oct, "Octave", rowA.removeFromLeft(knobWidth));
-        placeCompactKnob(ui.semi, "Interval", rowA.removeFromLeft(knobWidth));
-        placeCompactKnob(ui.fine, "Fine", rowA);
+        auto topRow = card.removeFromTop(Y(68));
+        auto waveColumn = topRow.removeFromLeft(topRow.getWidth() * 45 / 100);
+        captions.push_back({ waveColumn.removeFromTop(Y(10)), "WAVEFORM", CaptionKind::Knob });
+        ui.wave.setBounds(waveColumn.removeFromTop(Y(18)));
+        auto& loadButton = n == 0 ? loadOsc1Button : loadOsc2Button;
+        loadButton.setButtonText("LOAD WAV");
+        loadButton.setBounds(waveColumn.removeFromTop(Y(15)).reduced(X(1), 0));
+        wavePreviewBounds[(size_t) n] = waveColumn.reduced(X(2), Y(1));
+        auto largeKnobs = topRow;
+        const int largeCell = largeKnobs.getWidth() / 2;
+        placeCompactKnob(ui.fine, "Fine", largeKnobs.removeFromLeft(largeCell));
+        placeCompactKnob(ui.level, "Level", largeKnobs);
 
-        auto rowB = card.removeFromTop(kCompactRow);
-        const int knobWidthB = rowB.getWidth() / 5;
-        placeCompactKnob(ui.phase, "Phase", rowB.removeFromLeft(knobWidthB));
-        placeCompactKnob(ui.pan, "Pan", rowB.removeFromLeft(knobWidthB));
-        placeCompactKnob(ui.unison, "Unison", rowB.removeFromLeft(knobWidthB));
-        placeCompactKnob(ui.detune, "Detune", rowB.removeFromLeft(knobWidthB));
+        auto rowA = card.removeFromTop(Y(34));
+        const int cellA = rowA.getWidth() / 4;
+        placeCompactKnob(ui.wtPos, "WT Pos", rowA.removeFromLeft(cellA));
+        placeCompactKnob(ui.oct, "Octave", rowA.removeFromLeft(cellA));
+        placeCompactKnob(ui.semi, "Interval", rowA.removeFromLeft(cellA));
+        placeCompactKnob(ui.phase, "Phase", rowA);
+        auto rowB = card.removeFromTop(Y(34));
+        const int cellB = rowB.getWidth() / 4;
+        placeCompactKnob(ui.pan, "Pan", rowB.removeFromLeft(cellB));
+        placeCompactKnob(ui.unison, "Unison", rowB.removeFromLeft(cellB));
+        placeCompactKnob(ui.detune, "Detune", rowB.removeFromLeft(cellB));
         placeCompactKnob(ui.stereo, "Stereo", rowB);
-
-        addSection("AMP ENVELOPE", card.removeFromTop(18));
-        auto envRow = card.removeFromTop(kCompactRow);
-        const int envWidth = (envRow.getWidth() - 112) / 4;
-        placeCompactKnob(ui.attack, "Attack", envRow.removeFromLeft(envWidth));
-        placeCompactKnob(ui.decay, "Decay", envRow.removeFromLeft(envWidth));
-        placeCompactKnob(ui.sustain, "Sustain", envRow.removeFromLeft(envWidth));
-        placeCompactKnob(ui.release, "Release", envRow.removeFromLeft(envWidth));
-        ui.toFilter.setBounds(envRow.removeFromLeft(112).withHeight(28).withY(envRow.getY() + 20));
-        panels.push_back({ { panelX, panelY, sourceWidth, 300 }, juce::Colour(0xff292c2f) });
+        addSection("AMP ENVELOPE · OSC " + juce::String(n + 1), card.removeFromTop(Y(12)));
+        auto envRow = card.removeFromTop(Y(40));
+        const int envCell = envRow.getWidth() / 5;
+        placeCompactKnob(ui.attack, "Attack", envRow.removeFromLeft(envCell));
+        placeCompactKnob(ui.decay, "Decay", envRow.removeFromLeft(envCell));
+        placeCompactKnob(ui.sustain, "Sustain", envRow.removeFromLeft(envCell));
+        placeCompactKnob(ui.release, "Release", envRow.removeFromLeft(envCell));
+        ui.toFilter.setBounds(envRow.reduced(X(1), Y(8)));
+        panels.push_back({ { panelX, panelY, sourceWidth, Y(210) }, juce::Colour(0xff292c2f) });
+        oscillatorDropBounds[(size_t) n] = { panelX, panelY, sourceWidth, Y(210) };
     }
 
     sourceRow.removeFromLeft(sourceGap);
     auto subCard = sourceRow.removeFromLeft(sourceWidth);
     const int subX = subCard.getX(), subY = subCard.getY();
-    addSection("SUB OSCILLATOR", subCard.removeFromTop(20));
-    auto subControls = subCard.removeFromTop(78);
-    placeCombo(subWaveBox, "Wave", subControls.removeFromLeft(142));
-    subControls.removeFromLeft(8);
-    placeCompactKnob(subLevelSlider, "Level", subControls.removeFromLeft(80));
-    subToFilterButton.setBounds(subControls.removeFromLeft(112).withHeight(28).withY(subControls.getY() + 24));
-    addSection("AMP ENVELOPE", subCard.removeFromTop(18));
-    auto subEnvRow = subCard.removeFromTop(kCompactRow);
-    const int subEnvWidth = subEnvRow.getWidth() / 4;
-    placeCompactKnob(subAttackSlider, "Attack", subEnvRow.removeFromLeft(subEnvWidth));
-    placeCompactKnob(subDecaySlider, "Decay", subEnvRow.removeFromLeft(subEnvWidth));
-    placeCompactKnob(subSustainSlider, "Sustain", subEnvRow.removeFromLeft(subEnvWidth));
-    placeCompactKnob(subReleaseSlider, "Release", subEnvRow);
-    captions.push_back({ { subX + 12, subY + 205, sourceWidth - 24, 20 },
-        "SUB TUNED ONE OCTAVE BELOW", CaptionKind::Side });
-    panels.push_back({ { subX, subY, sourceWidth, 300 }, juce::Colour(0xff292c2f) });
-    area.removeFromTop(8);
+    auto subHeader = subCard.removeFromTop(Y(16));
+    subEnabledButton.setBounds(subHeader.removeFromRight(X(29)).reduced(X(1), Y(1)));
+    addSection("SUB OSCILLATOR", subHeader);
+    auto subControls = subCard.removeFromTop(Y(68));
+    auto subWaveCell = subControls.removeFromLeft(subControls.getWidth() * 42 / 100);
+    captions.push_back({ subWaveCell.removeFromTop(Y(10)), "WAVE", CaptionKind::Knob });
+    subWaveBox.setBounds(subWaveCell.removeFromTop(Y(18)));
+    placeCompactKnob(subLevelSlider, "Level", subControls.removeFromLeft(subControls.getWidth() / 2));
+    subToFilterButton.setBounds(subControls.reduced(X(1), Y(12)));
+    addSection("AMP ENVELOPE", subCard.removeFromTop(Y(12)));
+    auto subEnv = subCard.removeFromTop(Y(44));
+    const int subEnvCell = subEnv.getWidth() / 4;
+    placeCompactKnob(subAttackSlider, "Attack", subEnv.removeFromLeft(subEnvCell));
+    placeCompactKnob(subDecaySlider, "Decay", subEnv.removeFromLeft(subEnvCell));
+    placeCompactKnob(subSustainSlider, "Sustain", subEnv.removeFromLeft(subEnvCell));
+    placeCompactKnob(subReleaseSlider, "Release", subEnv);
+    captions.push_back({ { subX + X(8), subY + Y(187), sourceWidth - X(16), Y(11) },
+                         "TUNED ONE OCTAVE BELOW", CaptionKind::Side });
+    panels.push_back({ { subX, subY, sourceWidth, Y(210) }, juce::Colour(0xff292c2f) });
 
-    constexpr int kKnobRow = 14 + 68;
-
-    // ---------------- Filter with its envelope / centered scope ----------------
-    auto titleRow = area.removeFromTop(20);
-    auto synthRow = area.removeFromTop(220);
-    constexpr int scopeColumnWidth = 300;
-    const int sideWidth = (synthRow.getWidth() - scopeColumnWidth - 24) / 2;
-    auto filterG = synthRow.removeFromLeft(sideWidth); synthRow.removeFromLeft(12);
-    auto scopeG = synthRow.removeFromLeft(scopeColumnWidth);
-    synthRow.removeFromLeft(12);
+    auto synthRow = area.removeFromTop(Y(218));
+    const int scopeWidth = juce::jmin(X(155), synthRow.getWidth() * 28 / 100);
+    const int synthGap = X(8);
+    const int sideWidth = (synthRow.getWidth() - scopeWidth - synthGap * 2) / 2;
+    auto filterG = synthRow.removeFromLeft(sideWidth);
+    synthRow.removeFromLeft(synthGap);
+    auto scopeG = synthRow.removeFromLeft(scopeWidth);
+    synthRow.removeFromLeft(synthGap);
     auto masterG = synthRow;
-    const int shapeY = synthRow.getY();
 
-    auto span = [&](juce::Rectangle<int> g) { return juce::Rectangle<int>(g.getX(), titleRow.getY(), g.getWidth(), titleRow.getHeight()); };
-    addSection("FILTER", span(filterG));
-    addSection("OSCILLOSCOPE", span(scopeG));
-    addSection("MASTER", span(masterG));
-    panels.push_back({ filterG.withY(shapeY).withHeight(220), juce::Colour(0xff292c2f) });
-    panels.push_back({ masterG.withY(shapeY).withHeight(220), juce::Colour(0xff292c2f) });
-
-    auto filterHeader = filterG.removeFromTop(28);
-    filterOnButton.setBounds(filterHeader.removeFromLeft(112).reduced(2, 2));
-    filterTypeBox.setBounds(filterHeader.reduced(2, 2));
-    auto filterControls = filterG.removeFromTop(64);
+    auto filterTitle = filterG.removeFromTop(Y(16));
+    addSection("FILTER", filterTitle);
+    panels.push_back({ { filterG.getX(), filterTitle.getY(), filterG.getWidth(), Y(218) }, juce::Colour(0xff292c2f) });
+    auto filterHeader = filterG.removeFromTop(Y(23));
+    filterOnButton.setButtonText("ON · BYPASS");
+    filterOnButton.setBounds(filterHeader.removeFromLeft(X(56)).reduced(X(1), Y(1)));
+    filterTypeBox.setBounds(filterHeader.reduced(X(1), Y(1)));
+    auto filterControls = filterG.removeFromTop(Y(52));
     placeCompactKnob(cutoffSlider, "Cutoff", filterControls.removeFromLeft(filterControls.getWidth() / 2));
     placeCompactKnob(resonanceSlider, "Resonance", filterControls);
-    addSection("FILTER ENVELOPE (ADSR)", filterG.removeFromTop(16));
-    filterEnvelopeGraphBounds = filterG.removeFromTop(36).reduced(6, 1);
-    auto filterEnvKnobs = filterG.removeFromTop(70);
-    placeCompactKnob(filterEnvAttackSlider, "Attack", filterEnvKnobs.removeFromLeft(filterEnvKnobs.getWidth() / 5));
-    placeCompactKnob(filterEnvDecaySlider, "Decay", filterEnvKnobs.removeFromLeft(filterEnvKnobs.getWidth() / 4));
-    placeCompactKnob(filterEnvSustainSlider, "Sustain", filterEnvKnobs.removeFromLeft(filterEnvKnobs.getWidth() / 3));
-    placeCompactKnob(filterEnvReleaseSlider, "Release", filterEnvKnobs.removeFromLeft(filterEnvKnobs.getWidth() / 2));
+    addSection("FILTER ENVELOPE · ADSR", filterG.removeFromTop(Y(12)));
+    filterEnvelopeGraphBounds = filterG.removeFromTop(Y(34)).reduced(X(5), Y(1));
+    auto filterEnvKnobs = filterG.removeFromTop(Y(61));
+    const int envFilterCell = filterEnvKnobs.getWidth() / 5;
+    placeCompactKnob(filterEnvAttackSlider, "Attack", filterEnvKnobs.removeFromLeft(envFilterCell));
+    placeCompactKnob(filterEnvDecaySlider, "Decay", filterEnvKnobs.removeFromLeft(envFilterCell));
+    placeCompactKnob(filterEnvSustainSlider, "Sustain", filterEnvKnobs.removeFromLeft(envFilterCell));
+    placeCompactKnob(filterEnvReleaseSlider, "Release", filterEnvKnobs.removeFromLeft(envFilterCell));
     placeCompactKnob(filterEnvAmountSlider, "Amount", filterEnvKnobs);
-    oscilloscope.setBounds(scopeG.withSizeKeepingCentre(210, 210));
 
-    auto meterCell = masterG.removeFromRight(82);
-    outputMeterBounds = meterCell.reduced(10, 28);
-    placeCompactKnob(masterVolumeSlider, "Volume", masterG.removeFromLeft(masterG.getWidth() / 2));
-    placeCompactKnob(masterPanSlider, "Pan", masterG);
+    addSection("OSCILLOSCOPE · OUTPUT - STEREO", scopeG.removeFromTop(Y(16)));
+    const int scopeSide = juce::jmin(scopeG.getWidth(), scopeG.getHeight());
+    oscilloscope.setBounds(scopeG.withSizeKeepingCentre(scopeSide, scopeSide));
 
-    area.removeFromTop(8);
+    auto masterTitle = masterG.removeFromTop(Y(16));
+    addSection("MASTER OUTPUT", masterTitle.withWidth(juce::jmax(0, masterTitle.getWidth() - X(48))));
+    captions.push_back({ { masterTitle.getRight() - X(46), masterTitle.getY(), X(46), masterTitle.getHeight() },
+                         "STEREO", CaptionKind::Side });
+    panels.push_back({ { masterG.getX(), masterTitle.getY(), masterG.getWidth(), Y(218) }, juce::Colour(0xff292c2f) });
+    auto meterCell = masterG.removeFromRight(X(48));
+    outputMeterBounds = meterCell.withHeight(Y(112)).withCentre({ meterCell.getCentreX(), masterG.getCentreY() });
+    const int masterCell = masterG.getWidth() / 2;
+    auto masterControls = masterG.withHeight(Y(72)).withCentre({ masterG.getCentreX(), masterG.getCentreY() });
+    placeCompactKnob(masterVolumeSlider, "Volume", masterControls.removeFromLeft(masterCell));
+    placeCompactKnob(masterPanSlider, "Pan", masterControls);
 
-    // ---------------- два независимых LFO ----------------
-    auto lfoTitleRow = area.removeFromTop(20);
-    auto lfoRow = area.removeFromTop(112);
-    const int lfoGap = 12;
+    area.removeFromTop(Y(6));
+    auto lfoRow = area.removeFromTop(Y(112));
+    const int lfoGap = X(8);
     const int lfoWidth = (lfoRow.getWidth() - lfoGap) / 2;
     for (int n = 0; n < 2; ++n) {
         if (n > 0) lfoRow.removeFromLeft(lfoGap);
         auto card = lfoRow.removeFromLeft(lfoWidth);
         const int cardX = card.getX(), cardY = card.getY();
         auto& ui = lfoUI[(size_t) n];
-        auto header = card.removeFromTop(22);
-        ui.enabled.setBounds(header.removeFromRight(58).reduced(2, 1));
-        addSection("LFO " + juce::String(n + 1),
-                   { cardX, lfoTitleRow.getY(), lfoWidth, lfoTitleRow.getHeight() });
-        auto targetRow = card.removeFromTop(34);
-        placeCombo(ui.destination, "Target", targetRow.removeFromLeft(220));
-        targetRow.removeFromLeft(10);
-        placeCombo(ui.waveform, "Shape", targetRow.removeFromLeft(180));
-        auto controlRow = card;
-        placeCompactKnob(ui.rate, "Rate (Hz)", controlRow.removeFromLeft(94));
-        ui.tempoSync.setBounds(controlRow.removeFromLeft(76).withHeight(26).withY(controlRow.getY() + 22));
-        placeCombo(ui.syncDivision, "Tempo", controlRow.removeFromLeft(120));
-        placeCompactKnob(ui.depth, "Depth", controlRow);
-        panels.push_back({ { cardX, cardY, lfoWidth, 112 }, juce::Colour(0xff292c2f) });
+        auto header = card.removeFromTop(Y(16));
+        ui.enabled.setBounds(header.removeFromRight(X(38)).reduced(X(1), Y(1)));
+        addSection("LFO " + juce::String(n + 1), { cardX, cardY, lfoWidth - X(40), Y(16) });
+        auto targetRow = card.removeFromTop(Y(32));
+        const int targetWidth = targetRow.getWidth() / 2;
+        captions.push_back({ targetRow.removeFromTop(Y(10)), "DEST", CaptionKind::Knob });
+        ui.destination.setBounds(targetRow.removeFromTop(Y(20)).withWidth(targetWidth - X(3)));
+        auto shapeCell = juce::Rectangle<int>(cardX + targetWidth, cardY + Y(16), targetWidth, Y(32));
+        captions.push_back({ shapeCell.removeFromTop(Y(10)), "SHAPE", CaptionKind::Knob });
+        ui.waveform.setBounds(shapeCell.removeFromTop(Y(20)).reduced(X(1), 0));
+        auto controls = card;
+        const int controlCell = juce::jmax(X(40), controls.getWidth() / 5);
+        placeCompactKnob(ui.rate, "Rate (Hz)", controls.removeFromLeft(controlCell));
+        ui.tempoSync.setBounds(controls.removeFromLeft(X(48)).withHeight(Y(20)).withY(controls.getY() + Y(14)));
+        auto tempo = controls.removeFromLeft(X(72));
+        captions.push_back({ tempo.removeFromTop(Y(10)), "DIV", CaptionKind::Knob });
+        ui.syncDivision.setBounds(tempo.removeFromTop(Y(20)));
+        placeCompactKnob(ui.depth, "Depth", controls);
+        panels.push_back({ { cardX, cardY, lfoWidth, Y(112) }, juce::Colour(0xff292c2f) });
     }
 
-    area.removeFromTop(8);
+    area.removeFromTop(Y(7));
+    auto performance = area.removeFromTop(Y(107));
+    panels.push_back({ performance, juce::Colour(0xff292c2f) });
+    addSection("PERFORMANCE", performance.removeFromTop(Y(14)));
+    auto wheels = performance.removeFromLeft(X(70));
+    auto wheelTitle = wheels.removeFromTop(Y(10));
+    captions.push_back({ wheelTitle, "WHEELS", CaptionKind::Knob });
+    auto pitchCell = wheels.removeFromLeft(wheels.getWidth() / 2);
+    captions.push_back({ pitchCell.removeFromTop(Y(9)), "PITCH", CaptionKind::Knob });
+    pitchWheelSlider.setBounds(pitchCell.removeFromTop(Y(53)).reduced(X(5), 0));
+    auto modCell = wheels;
+    captions.push_back({ modCell.removeFromTop(Y(9)), "MOD", CaptionKind::Knob });
+    modWheelSlider.setBounds(modCell.removeFromTop(Y(53)).reduced(X(5), 0));
+    pitchRangeBox.setBounds({ wheels.getX(), wheels.getBottom() - Y(18), X(66), Y(17) });
 
-    area.removeFromTop(8);
-    addSection("PERFORMANCE", area.removeFromTop(20));
-    auto performance = area.removeFromTop(122);
-    auto wheels = performance.removeFromLeft(110);
-    auto wheelTitle = wheels.removeFromTop(14);
-    captions.push_back({ wheelTitle, "PITCH / MOD", CaptionKind::Knob });
-    const int wheelWidth = 38;
-    auto pitchCell = wheels.removeFromLeft(wheelWidth);
-    captions.push_back({ pitchCell.removeFromTop(12), "PITCH", CaptionKind::Knob });
-    pitchWheelSlider.setBounds(pitchCell.removeFromTop(78).reduced(6, 0));
-    auto modCell = wheels.removeFromLeft(wheelWidth);
-    captions.push_back({ modCell.removeFromTop(12), "MOD", CaptionKind::Knob });
-    modWheelSlider.setBounds(modCell.removeFromTop(78).reduced(6, 0));
-    pitchRangeBox.setBounds(wheels.removeFromTop(24).withWidth(104));
-
-    performance.removeFromLeft(8);
-    auto keyboardArea = performance.removeFromLeft(performance.getWidth() - 154);
-    keyboard.setBounds(keyboardArea.reduced(2, 10));
-    performance.removeFromLeft(8);
-    auto voice = performance;
-    addSection("VOICE", juce::Rectangle<int>(voice.getX(), area.getY() - 20, voice.getWidth(), 20));
-    auto voiceChoices = voice.removeFromTop(40);
-    placeCombo(voiceModeBox, "Mode", voiceChoices.removeFromLeft(voiceChoices.getWidth() / 2));
-    placeCombo(voiceCountBox, "Voices", voiceChoices);
-    placeCompactKnob(glideSlider, "Glide", voice.removeFromLeft(70));
+    performance.removeFromLeft(X(5));
+    auto voice = performance.removeFromRight(X(92));
+    performance.removeFromRight(X(5));
+    keyboard.setBounds(performance.reduced(X(2), Y(4)));
+    addSection("VOICE", { voice.getX(), voice.getY(), voice.getWidth(), Y(14) });
+    auto voiceChoices = voice.withY(voice.getY() + Y(17)).withHeight(Y(22));
+    voiceModeBox.setBounds(voiceChoices.removeFromLeft(voiceChoices.getWidth() / 2).reduced(X(1), 0));
+    voiceCountBox.setBounds(voiceChoices.reduced(X(1), 0));
+    placeCompactKnob(glideSlider, "Glide", voice.withY(voice.getY() + Y(38)).withHeight(Y(57)));
 }
 
 void WavetableSynthAudioProcessorEditor::buttonClicked(juce::Button* button) {

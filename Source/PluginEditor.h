@@ -9,6 +9,8 @@
 #include <vector>
 
 class WavetableSynthAudioProcessorEditor : public juce::AudioProcessorEditor,
+                                           public juce::DragAndDropContainer,
+                                           public juce::DragAndDropTarget,
                                            public juce::Button::Listener,
                                            public juce::FileBrowserListener,
                                            private juce::Timer {
@@ -26,6 +28,14 @@ public:
     void fileClicked(const juce::File&, const juce::MouseEvent&) override {}
     void fileDoubleClicked(const juce::File&) override {}
     void browserRootChanged(const juce::File&) override {}
+    bool isInterestedInDragSource(const SourceDetails& details) override;
+    void itemDragEnter(const SourceDetails& details) override;
+    void itemDragMove(const SourceDetails& details) override;
+    void itemDragExit(const SourceDetails& details) override;
+    void itemDropped(const SourceDetails& details) override;
+    void mouseDown(const juce::MouseEvent& event) override;
+    void mouseDrag(const juce::MouseEvent& event) override;
+    void mouseUp(const juce::MouseEvent& event) override;
 
 private:
     void timerCallback() override;
@@ -44,6 +54,9 @@ private:
     struct Panel { juce::Rectangle<int> bounds; juce::Colour colour; };
     std::vector<Caption> captions;
     std::vector<Panel> panels;
+    std::array<juce::Rectangle<int>, 2> oscillatorDropBounds;
+    int dragHoverOscillator = 0;
+    bool dragStartedFromBrowser = false;
 
     void placeKnob(juce::Slider& slider, const juce::String& name, juce::Rectangle<int> cell);
     void placeCompactKnob(juce::Slider& slider, const juce::String& name, juce::Rectangle<int> cell);
@@ -55,6 +68,7 @@ private:
     OscilloscopeDisplay oscilloscope;
     juce::MidiKeyboardComponent keyboard;
 
+    juce::TextButton optionsButton { "OPTIONS" };
     juce::TextButton loadOsc1Button { "Load WAV..." };
     juce::TextButton loadOsc2Button { "Load WAV..." };
     juce::TextButton synthTabButton { "SYNTH" }, effectsTabButton { "EFFECTS" }, arpTabButton { "ARPEGGIATOR" };
@@ -66,6 +80,7 @@ private:
         juce::Slider wtPos, level, oct, semi, fine, phase, pan, unison, detune, stereo;
         juce::Slider attack, decay, sustain, release;
         juce::TextButton analogButton { "ANALOG MODE" };
+        juce::ToggleButton enabled { "ON" };
         juce::ToggleButton toFilter { "TO FILTER" };
     };
     std::array<OscUI, 2> oscUI;
@@ -74,6 +89,7 @@ private:
     juce::ComboBox subWaveBox;
     juce::Slider subLevelSlider;
     juce::Slider subAttackSlider, subDecaySlider, subSustainSlider, subReleaseSlider;
+    juce::ToggleButton subEnabledButton { "ON" };
     juce::ToggleButton subToFilterButton { "TO FILTER" };
     juce::Slider cutoffSlider, resonanceSlider;
     juce::ToggleButton filterOnButton { "FILTER ON" };
